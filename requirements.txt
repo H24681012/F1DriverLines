@@ -1,0 +1,6 @@
+dash
+dash-bootstrap-components
+pandas
+numpy
+plotly
+fastf1==3.3.3
