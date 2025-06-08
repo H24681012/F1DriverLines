@@ -42,7 +42,7 @@ DROPDOWN_STYLE = {'color': 'black'}
 def get_session(year, gp, session_type):
     try:
         session = fastf1.get_session(year, gp, session_type)
-        session.load(telemetry=True, laps=True, weather=False)
+        session.load()
         return session
     except Exception as e:
         print(f"Error loading session for {year} {gp} {session_type}: {e}")
