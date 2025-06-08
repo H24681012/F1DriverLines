@@ -17,7 +17,7 @@ if tuple(map(int, fastf1.__version__.split('.'))) < required_version:
         f"found {fastf1.__version__}. Please upgrade with 'pip install --upgrade fastf1'."
     )
 
-CACHE_DIR = '/app/cache'
+CACHE_DIR = "/data/fastf1_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 fastf1.Cache.enable_cache(CACHE_DIR)
