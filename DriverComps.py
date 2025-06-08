@@ -31,7 +31,7 @@ app = dash.Dash(
 server = app.server
 
 # --- Constants & Helpers ---
-YEARS = list(range(2018, 2026))[::-1]
+YEARS = [year for year in range(2018, 2026) if year != 2022][::-1]  # Remove 2022
 DEFAULT_YEAR = 2024
 PLOT_TEMPLATE = 'plotly_dark'
 BG_COLOR = '#111111'
