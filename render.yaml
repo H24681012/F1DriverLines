@@ -1,7 +1,9 @@
 services:
   - type: web
-    name: f1-racing-lines
+    name: f1driverlines
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
-    plan: free
+    startCommand: gunicorn DriverComps:server
+    disk:
+      name: f1cache
+      mountPath: /app/cache
