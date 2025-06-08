@@ -4,3 +4,4 @@ pandas
 numpy
 plotly
 fastf1==3.3.3
+gunicorn
