@@ -40,11 +40,16 @@ DRIVER1_COLOR = 'blue'
 DRIVER2_COLOR = 'red'
 DROPDOWN_STYLE = {'color': 'black'}
 
-@functools.lru_cache(maxsize=8)
+_session_cache = {}
+
 def get_session(year, gp, session_type):
+    key = (year, gp, session_type)
+    if key in _session_cache:
+        return _session_cache[key]
     try:
         session = fastf1.get_session(year, gp, session_type)
         session.load(telemetry=True, laps=True, weather=False)
+        _session_cache[key] = session
         return session
     except Exception as e:
         print(f"Error loading session for {year} {gp} {session_type}: {e}")
@@ -66,6 +71,9 @@ def create_empty_figure(message):
 
 # --- RESTORED Resampling Helper from original code ---
 def resample_telemetry(target_dist_axis, source_dist_axis, source_values_axis, source_name="data"):
+    target_dist_axis = np.asarray(target_dist_axis)
+    source_dist_axis = np.asarray(source_dist_axis)
+    source_values_axis = np.asarray(source_values_axis, dtype=float)
     L_target = len(target_dist_axis)
     if L_target == 0: return np.array([])
     if len(source_values_axis) == L_target and np.array_equal(source_dist_axis, target_dist_axis): return source_values_axis
@@ -195,35 +203,40 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
             gear1, gear2 = np.array(telemetry_data['gear1']), np.array(telemetry_data['gear2'])
             title_suffix = ""
         elif 'xaxis.range[0]' in relayout:
-            map_x, map_y, map_dist = np.array(telemetry_data['ref_x']), np.array(telemetry_data['ref_y']), np.array(telemetry_data['ref_dist'])
+            ref_x, ref_y, ref_dist = np.array(telemetry_data['ref_x']), np.array(telemetry_data['ref_y']), np.array(telemetry_data['ref_dist'])
+            cmp_x, cmp_y, cmp_dist = np.array(telemetry_data['cmp_x']), np.array(telemetry_data['cmp_y']), np.array(telemetry_data['cmp_dist'])
             x_min, x_max, y_min, y_max = relayout['xaxis.range[0]'], relayout['xaxis.range[1]'], relayout['yaxis.range[0]'], relayout['yaxis.range[1]']
-            
-            # Find points within the zoom box
-            mask = (map_x >= x_min) & (map_x <= x_max) & (map_y >= y_min) & (map_y <= y_max)
-            points_in_zoom = np.sum(mask)
-            
+
+            # Find points within the zoom box from BOTH drivers
+            ref_mask = (ref_x >= x_min) & (ref_x <= x_max) & (ref_y >= y_min) & (ref_y <= y_max)
+            cmp_mask = (cmp_x >= x_min) & (cmp_x <= x_max) & (cmp_y >= y_min) & (cmp_y <= y_max)
+
+            # Collect all matched distances from both drivers
+            matched_dists = np.concatenate([ref_dist[ref_mask], cmp_dist[cmp_mask]])
+            points_in_zoom = len(matched_dists)
+
             if points_in_zoom >= 2:
-                # Sufficient points - use them directly
-                min_dist, max_dist = map_dist[mask].min(), map_dist[mask].max()
+                min_dist, max_dist = matched_dists.min(), matched_dists.max()
                 title_suffix = " (Zoomed)"
             elif points_in_zoom == 1:
-                # Single point - add minimal padding
-                center_dist = map_dist[mask][0]
-                padding = 15  # 15 meters each side
+                center_dist = matched_dists[0]
+                padding = 15
                 min_dist = max(0, center_dist - padding)
-                max_dist = min(map_dist.max(), center_dist + padding)
+                max_dist = min(max(ref_dist.max(), cmp_dist.max()), center_dist + padding)
                 title_suffix = " (Point Focus)"
             else:
-                # No points in zoom - find closest point and add minimal context
+                # No points — find closest point across both drivers
                 center_x, center_y = (x_min + x_max) / 2, (y_min + y_max) / 2
-                distances_to_center = np.sqrt((map_x - center_x)**2 + (map_y - center_y)**2)
-                closest_idx = np.argmin(distances_to_center)
-                closest_dist = map_dist[closest_idx]
-                
-                # Minimal expansion - just enough to show some context
-                padding = 20  # 20 meters each side
+                ref_dists_to_center = np.sqrt((ref_x - center_x)**2 + (ref_y - center_y)**2)
+                cmp_dists_to_center = np.sqrt((cmp_x - center_x)**2 + (cmp_y - center_y)**2)
+                ref_closest = ref_dist[np.argmin(ref_dists_to_center)]
+                cmp_closest = cmp_dist[np.argmin(cmp_dists_to_center)]
+                closest_dist = ref_closest if ref_dists_to_center.min() < cmp_dists_to_center.min() else cmp_closest
+
+                padding = 20
+                max_track_dist = max(ref_dist.max(), cmp_dist.max())
                 min_dist = max(0, closest_dist - padding)
-                max_dist = min(map_dist.max(), closest_dist + padding)
+                max_dist = min(max_track_dist, closest_dist + padding)
                 title_suffix = " (Nearest Point)"
             
             # Apply the distance filter to telemetry data
@@ -273,15 +286,17 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
         cmp_merged = pd.merge_asof(lap2.get_car_data().add_distance(), lap2.get_pos_data(), on='Time', direction='nearest').dropna(subset=['X','Y','Distance'])
 
         for name, data, color in [(label1, ref_merged, DRIVER1_COLOR), (label2, cmp_merged, DRIVER2_COLOR)]:
-            is_brake, prev_is_brake = data['Brake'] > 0, data['Brake'].shift(fill_value=False)
+            is_brake = data['Brake'] > 0
+            prev_is_brake = is_brake.shift(fill_value=False)
             starts, ends = data.index[~prev_is_brake & is_brake], data.index[prev_is_brake & ~is_brake]
+            starts_set = set(starts.tolist())
             bounds = sorted(list(set([0] + starts.tolist() + ends.tolist() + [len(data)-1])))
-            
+
             if len(bounds) > 1:
                 for i in range(len(bounds) - 1):
                     start, end = bounds[i], bounds[i+1]
                     if start >= end: continue
-                    seg_type = 'brake' if start in starts.values else 'throttle'
+                    seg_type = 'brake' if start in starts_set else 'throttle'
                     track_fig.add_trace(go.Scatter(x=data['X'].iloc[start:end+1], y=data['Y'].iloc[start:end+1], mode='lines', line=dict(color=color, width=3, dash=dmap[seg_type]), name=f"{name} Line", legendgroup=name, showlegend=(i==0)))
             else:
                  track_fig.add_trace(go.Scatter(x=data['X'], y=data['Y'], mode='lines', line=dict(color=color, width=3, dash='dash'), name=f"{name} Line", legendgroup=name, showlegend=True))
@@ -320,7 +335,7 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
             ]
         )
         track_fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
-        track_fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
+        track_fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)', scaleanchor="x", scaleratio=1)
         
         # --- TELEMETRY --- FIXED: lap1 first, lap2 second
         delta_s, ref_tel, cmp_tel = delta_time(lap1, lap2)
@@ -332,7 +347,13 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
         
         delta_fig, speed_fig, gear_fig = create_delta_plot(common_dist, delta, label1, label2), create_telemetry_plot(common_dist, speed1, speed2, "Speed (Km/h)", label1, label2), create_telemetry_plot(common_dist, gear1, gear2, "Gear", label1, label2, line_shape='hv')
         
-        telemetry_store = {'ref_x': ref_merged['X'].tolist(), 'ref_y': ref_merged['Y'].tolist(), 'ref_dist': ref_merged['Distance'].tolist(), 'common_dist': common_dist.tolist(), 'delta': delta.tolist(), 'speed1': speed1.tolist(), 'gear1': gear1.tolist(), 'speed2': speed2.tolist(), 'gear2': gear2.tolist(), 'l1_name': label1, 'l2_name': label2}
+        telemetry_store = {
+            'ref_x': ref_merged['X'].tolist(), 'ref_y': ref_merged['Y'].tolist(), 'ref_dist': ref_merged['Distance'].tolist(),
+            'cmp_x': cmp_merged['X'].tolist(), 'cmp_y': cmp_merged['Y'].tolist(), 'cmp_dist': cmp_merged['Distance'].tolist(),
+            'common_dist': common_dist.tolist(), 'delta': delta.tolist(),
+            'speed1': speed1.tolist(), 'gear1': gear1.tolist(), 'speed2': speed2.tolist(), 'gear2': gear2.tolist(),
+            'l1_name': label1, 'l2_name': label2,
+        }
         return track_fig, delta_fig, speed_fig, gear_fig, telemetry_store
     except Exception as e:
         print(f"Error processing comparison: {e}")
