@@ -8,6 +8,7 @@ import plotly.graph_objs as go
 import dash_bootstrap_components as dbc
 import sys
 import os
+import functools
 
 # --- FastF1 Version Check & Cache Setup ---
 required_version = (3, 3, 3)
@@ -31,7 +32,7 @@ app = dash.Dash(
 server = app.server
 
 # --- Constants & Helpers ---
-YEARS = [year for year in range(2018, 2026) if year != 2022][::-1]  # Remove 2022
+YEARS = list(range(2018, 2026))[::-1]
 DEFAULT_YEAR = 2024
 PLOT_TEMPLATE = 'plotly_dark'
 BG_COLOR = '#111111'
@@ -39,6 +40,7 @@ DRIVER1_COLOR = 'blue'
 DRIVER2_COLOR = 'red'
 DROPDOWN_STYLE = {'color': 'black'}
 
+@functools.lru_cache(maxsize=8)
 def get_session(year, gp, session_type):
     try:
         session = fastf1.get_session(year, gp, session_type)
@@ -47,6 +49,10 @@ def get_session(year, gp, session_type):
     except Exception as e:
         print(f"Error loading session for {year} {gp} {session_type}: {e}")
         return None
+
+@functools.lru_cache(maxsize=16)
+def get_schedule(year):
+    return fastf1.get_event_schedule(year, include_testing=False)
 
 def create_empty_figure(message):
     fig = go.Figure()
@@ -77,36 +83,27 @@ def create_driver_controls():
         dbc.Label("Year", className="text-white mt-3"),
         dcc.Dropdown(id='year-drivers', options=YEARS, value=DEFAULT_YEAR, clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Grand Prix", className="text-white mt-3"),
-        dcc.Dropdown(id='gp-drivers', placeholder="Select year first...", clearable=False, style=DROPDOWN_STYLE),
+        dcc.Dropdown(id='gp-drivers', clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Session", className="text-white mt-3"),
         dcc.Dropdown(id='session-type-drivers', options=['FP1','FP2','FP3','Q','R'], value='Q', clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Driver 1 (Reference)", className="text-white mt-3"),
-        dcc.Loading(
-            dcc.Dropdown(id='driver1-drivers', placeholder="Select GP and session first...", clearable=False, style=DROPDOWN_STYLE),
-            type="circle"
-        ),
+        dcc.Dropdown(id='driver1-drivers', clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Driver 2 (Comparison)", className="text-white mt-3"),
-        dcc.Loading(
-            dcc.Dropdown(id='driver2-drivers', placeholder="Select GP and session first...", clearable=False, style=DROPDOWN_STYLE),
-            type="circle"
-        ),
+        dcc.Dropdown(id='driver2-drivers', clearable=False, style=DROPDOWN_STYLE),
         dbc.Button('Compare', id='compare-btn-drivers', color='primary', className='mt-3 w-100')
     ])
 
 def create_year_controls():
     return html.Div([
         dbc.Label("Reference Driver (from Year 1)", className="text-white mt-3"),
-        dcc.Loading(
-            dcc.Dropdown(id='driver-years', placeholder="Select Year 1 options first...", clearable=False, style=DROPDOWN_STYLE),
-            type="circle"
-        ),
+        dcc.Dropdown(id='driver-years', clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Year 1 / GP 1 / Session 1", className="text-white mt-3"),
         dcc.Dropdown(id='year1-years', options=YEARS, value=DEFAULT_YEAR, clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='gp1-years', placeholder="Select year first...", className="mt-1", clearable=False, style=DROPDOWN_STYLE),
+        dcc.Dropdown(id='gp1-years', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
         dcc.Dropdown(id='session-type1-years', options=['FP1','FP2','FP3','Q','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Year 2 / GP 2 / Session 2", className="text-white mt-3"),
         dcc.Dropdown(id='year2-years', options=YEARS, value=DEFAULT_YEAR - 1, clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='gp2-years', placeholder="Select year first...", className="mt-1", clearable=False, style=DROPDOWN_STYLE),
+        dcc.Dropdown(id='gp2-years', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
         dcc.Dropdown(id='session-type2-years', options=['FP1','FP2','FP3','Q','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
         dbc.Button('Compare', id='compare-btn-years', color='primary', className='mt-3 w-100')
     ])
@@ -115,8 +112,6 @@ def create_year_controls():
 app.layout = dbc.Container(
     [
         html.H2("F1 Telemetry Comparator", className="text-white my-3 text-center"),
-        html.P("Select your options below and wait for the driver dropdowns to load data from the F1 servers. Sorry for the delay!", 
-               className="text-muted text-center mb-4", style={'fontSize': '14px'}),
         dbc.Row(
             [
                 dbc.Col(
@@ -155,27 +150,20 @@ def create_gp_dropdown_callback(output_id, year_id):
     @app.callback(Output(output_id, 'options'), Input(year_id, 'value'))
     def update_gp_dropdown(year):
         if not year: return []
-        schedule = fastf1.get_event_schedule(year, include_testing=False)
+        schedule = get_schedule(year)
         return [{'label': row['EventName'], 'value': row['EventName']} for index, row in schedule.iterrows()]
 
 def create_driver_dropdown_callback(output_id, year_id, gp_id, session_id):
     @app.callback(Output(output_id, 'options'), [Input(year_id, 'value'), Input(gp_id, 'value'), Input(session_id, 'value')])
     def update_driver_dropdown(year, gp, session_type):
-        if not all([year, gp, session_type]): 
-            return [{'label': 'Loading drivers...', 'value': '', 'disabled': True}] if any([year, gp, session_type]) else []
+        if not all([year, gp, session_type]): return []
         try:
             session = get_session(year, gp, session_type)
-            if session and session.laps is not None:
-                drivers = session.laps['Driver'].unique()
-                if len(drivers) > 0:
-                    return [{'label': driver, 'value': driver} for driver in sorted(drivers)]
-                else:
-                    return [{'label': 'No drivers found', 'value': '', 'disabled': True}]
-            else:
-                return [{'label': 'Failed to load session', 'value': '', 'disabled': True}]
+            drivers = session.laps['Driver'].unique() if session and session.laps is not None else []
+            return [{'label': driver, 'value': driver} for driver in sorted(drivers)]
         except Exception as e:
             print(f"Could not load drivers for {year} {gp} {session_type}: {e}")
-            return [{'label': 'Error loading drivers', 'value': '', 'disabled': True}]
+            return []
 
 create_gp_dropdown_callback('gp-drivers', 'year-drivers')
 create_gp_dropdown_callback('gp1-years', 'year1-years')
