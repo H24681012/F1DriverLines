@@ -9,6 +9,7 @@ import dash_bootstrap_components as dbc
 import sys
 import os
 import functools
+from datetime import datetime
 
 # --- FastF1 Version Check & Cache Setup ---
 required_version = (3, 3, 3)
@@ -32,8 +33,9 @@ app = dash.Dash(
 server = app.server
 
 # --- Constants & Helpers ---
-YEARS = list(range(2018, 2026))[::-1]
-DEFAULT_YEAR = 2024
+_current_year = datetime.now().year
+YEARS = list(range(2018, _current_year + 1))[::-1]
+DEFAULT_YEAR = _current_year
 PLOT_TEMPLATE = 'plotly_dark'
 BG_COLOR = '#111111'
 DRIVER1_COLOR = 'blue'
@@ -41,6 +43,7 @@ DRIVER2_COLOR = 'red'
 DROPDOWN_STYLE = {'color': 'black'}
 
 _session_cache = {}
+_SESSION_CACHE_MAX = 8
 
 def get_session(year, gp, session_type):
     key = (year, gp, session_type)
@@ -49,6 +52,10 @@ def get_session(year, gp, session_type):
     try:
         session = fastf1.get_session(year, gp, session_type)
         session.load(telemetry=True, laps=True, weather=False)
+        # Evict oldest entry if cache is full
+        if len(_session_cache) >= _SESSION_CACHE_MAX:
+            oldest_key = next(iter(_session_cache))
+            del _session_cache[oldest_key]
         _session_cache[key] = session
         return session
     except Exception as e:
@@ -93,7 +100,7 @@ def create_driver_controls():
         dbc.Label("Grand Prix", className="text-white mt-3"),
         dcc.Dropdown(id='gp-drivers', clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Session", className="text-white mt-3"),
-        dcc.Dropdown(id='session-type-drivers', options=['FP1','FP2','FP3','Q','R'], value='Q', clearable=False, style=DROPDOWN_STYLE),
+        dcc.Dropdown(id='session-type-drivers', options=['FP1','FP2','FP3','Q','Sprint Shootout','Sprint','R'], value='Q', clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Driver 1 (Reference)", className="text-white mt-3"),
         dcc.Dropdown(id='driver1-drivers', clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Driver 2 (Comparison)", className="text-white mt-3"),
@@ -108,11 +115,11 @@ def create_year_controls():
         dbc.Label("Year 1 / GP 1 / Session 1", className="text-white mt-3"),
         dcc.Dropdown(id='year1-years', options=YEARS, value=DEFAULT_YEAR, clearable=False, style=DROPDOWN_STYLE),
         dcc.Dropdown(id='gp1-years', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='session-type1-years', options=['FP1','FP2','FP3','Q','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
+        dcc.Dropdown(id='session-type1-years', options=['FP1','FP2','FP3','Q','Sprint Shootout','Sprint','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
         dbc.Label("Year 2 / GP 2 / Session 2", className="text-white mt-3"),
         dcc.Dropdown(id='year2-years', options=YEARS, value=DEFAULT_YEAR - 1, clearable=False, style=DROPDOWN_STYLE),
         dcc.Dropdown(id='gp2-years', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='session-type2-years', options=['FP1','FP2','FP3','Q','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
+        dcc.Dropdown(id='session-type2-years', options=['FP1','FP2','FP3','Q','Sprint Shootout','Sprint','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
         dbc.Button('Compare', id='compare-btn-years', color='primary', className='mt-3 w-100')
     ])
 
@@ -159,7 +166,7 @@ def create_gp_dropdown_callback(output_id, year_id):
     def update_gp_dropdown(year):
         if not year: return []
         schedule = get_schedule(year)
-        return [{'label': row['EventName'], 'value': row['EventName']} for index, row in schedule.iterrows()]
+        return [{'label': name, 'value': name} for name in schedule['EventName']]
 
 def create_driver_dropdown_callback(output_id, year_id, gp_id, session_id):
     @app.callback(Output(output_id, 'options'), [Input(year_id, 'value'), Input(gp_id, 'value'), Input(session_id, 'value')])
@@ -266,24 +273,41 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
     try:
         if feature == 'drivers':
             if not all([y_d, gp_d, s_d, drv1, drv2]): raise ValueError("Please select all driver options.")
-            session, lap1, lap2 = get_session(y_d, gp_d, s_d), None, None
-            lap1, lap2 = session.laps.pick_driver(drv1).pick_fastest(), session.laps.pick_driver(drv2).pick_fastest()
+            session = get_session(y_d, gp_d, s_d)
+            if session is None: raise ValueError(f"Failed to load session: {y_d} {gp_d} {s_d}")
+            lap1 = session.laps.pick_driver(drv1).pick_fastest()
+            lap2 = session.laps.pick_driver(drv2).pick_fastest()
+            if lap1 is None: raise ValueError(f"No lap data found for {drv1}.")
+            if lap2 is None: raise ValueError(f"No lap data found for {drv2}.")
             label1, label2 = drv1, drv2
         else:
             if not all([drv_y, y1, gp1, s1, y2, gp2, s2]): raise ValueError("Please select all year options.")
-            # Use same GP and session for year comparison
             gp_to_use, session_to_use = gp1, s1
-            s1_obj, s2_obj = get_session(y1, gp_to_use, session_to_use), get_session(y2, gp_to_use, session_to_use)
-            lap1, lap2 = s1_obj.laps.pick_driver(drv_y).pick_fastest(), s2_obj.laps.pick_driver(drv_y).pick_fastest()
+            s1_obj = get_session(y1, gp_to_use, session_to_use)
+            s2_obj = get_session(y2, gp_to_use, session_to_use)
+            if s1_obj is None: raise ValueError(f"Failed to load session: {y1} {gp_to_use} {session_to_use}")
+            if s2_obj is None: raise ValueError(f"Failed to load session: {y2} {gp_to_use} {session_to_use}")
+            lap1 = s1_obj.laps.pick_driver(drv_y).pick_fastest()
+            lap2 = s2_obj.laps.pick_driver(drv_y).pick_fastest()
+            if lap1 is None: raise ValueError(f"No lap data for {drv_y} in {y1} {gp_to_use}.")
+            if lap2 is None: raise ValueError(f"No lap data for {drv_y} in {y2} {gp_to_use}.")
             label1, label2 = f"{drv_y} ({y1})", f"{drv_y} ({y2})"
-        
+
         if pd.isna(lap1.LapTime) or pd.isna(lap2.LapTime): raise ValueError("A selected lap has no time set.")
         
         # --- RACING LINE PLOT ---
         track_fig = go.Figure()
         dmap = {'throttle': 'dash', 'brake': 'dot'}
-        ref_merged = pd.merge_asof(lap1.get_car_data().add_distance(), lap1.get_pos_data(), on='Time', direction='nearest').dropna(subset=['X','Y','Distance'])
-        cmp_merged = pd.merge_asof(lap2.get_car_data().add_distance(), lap2.get_pos_data(), on='Time', direction='nearest').dropna(subset=['X','Y','Distance'])
+        ref_merged = pd.merge_asof(
+            lap1.get_car_data().add_distance().sort_values('Time'),
+            lap1.get_pos_data().sort_values('Time'),
+            on='Time', direction='nearest'
+        ).dropna(subset=['X','Y','Distance']).reset_index(drop=True)
+        cmp_merged = pd.merge_asof(
+            lap2.get_car_data().add_distance().sort_values('Time'),
+            lap2.get_pos_data().sort_values('Time'),
+            on='Time', direction='nearest'
+        ).dropna(subset=['X','Y','Distance']).reset_index(drop=True)
 
         for name, data, color in [(label1, ref_merged, DRIVER1_COLOR), (label2, cmp_merged, DRIVER2_COLOR)]:
             is_brake = data['Brake'] > 0
