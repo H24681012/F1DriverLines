@@ -144,6 +144,7 @@ app.layout = dbc.Container(
                         dcc.Loading(dcc.Graph(id='delta-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
                         dcc.Loading(dcc.Graph(id='speed-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
                         dcc.Loading(dcc.Graph(id='gear-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
+                        dcc.Loading(dcc.Graph(id='throttle-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
                         dcc.Store(id='telemetry-data-store'),
                     ],
                     width=9,
@@ -190,7 +191,7 @@ create_driver_dropdown_callback('driver-years', 'year1-years', 'gp1-years', 'ses
 
 # --- Main Callback ---
 @app.callback(
-    [Output('track-plot', 'figure'), Output('delta-plot', 'figure'), Output('speed-plot', 'figure'), Output('gear-plot', 'figure'), Output('telemetry-data-store', 'data')],
+    [Output('track-plot', 'figure'), Output('delta-plot', 'figure'), Output('speed-plot', 'figure'), Output('gear-plot', 'figure'), Output('throttle-plot', 'figure'), Output('telemetry-data-store', 'data')],
     [Input('compare-btn-drivers', 'n_clicks'), Input('compare-btn-years', 'n_clicks'), Input('track-plot', 'relayoutData')],
     [State('feature-dropdown', 'value'),
      State('year-drivers', 'value'), State('gp-drivers', 'value'), State('session-type-drivers', 'value'), State('driver1-drivers', 'value'), State('driver2-drivers', 'value'),
@@ -210,6 +211,7 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
             dist, delta = np.array(telemetry_data['common_dist']), np.array(telemetry_data['delta'])
             speed1, speed2 = np.array(telemetry_data['speed1']), np.array(telemetry_data['speed2'])
             gear1, gear2 = np.array(telemetry_data['gear1']), np.array(telemetry_data['gear2'])
+            throttle1, throttle2 = np.array(telemetry_data['throttle1']), np.array(telemetry_data['throttle2'])
             title_suffix = ""
         elif 'xaxis.range[0]' in relayout:
             ref_x, ref_y, ref_dist = np.array(telemetry_data['ref_x']), np.array(telemetry_data['ref_y']), np.array(telemetry_data['ref_dist'])
@@ -247,23 +249,25 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
             zoom_mask = (full_dist >= min_dist) & (full_dist <= max_dist)
 
             if np.sum(zoom_mask) == 0:
-                return no_update, create_empty_figure("No telemetry in range"), create_empty_figure(""), create_empty_figure(""), no_update
+                return no_update, create_empty_figure("No telemetry in range"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
 
             dist = full_dist[zoom_mask]
             delta = np.array(telemetry_data['delta'])[zoom_mask]
             speed1, speed2 = np.array(telemetry_data['speed1'])[zoom_mask], np.array(telemetry_data['speed2'])[zoom_mask]
             gear1, gear2 = np.array(telemetry_data['gear1'])[zoom_mask], np.array(telemetry_data['gear2'])[zoom_mask]
+            throttle1, throttle2 = np.array(telemetry_data['throttle1'])[zoom_mask], np.array(telemetry_data['throttle2'])[zoom_mask]
 
         else:
-            return no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update
 
         delta_fig = create_delta_plot(dist, delta, telemetry_data['l1_name'], telemetry_data['l2_name'], title_suffix)
         speed_fig = create_telemetry_plot(dist, speed1, speed2, "Speed (Km/h)", telemetry_data['l1_name'], telemetry_data['l2_name'], title_suffix)
         gear_fig = create_telemetry_plot(dist, gear1, gear2, "Gear", telemetry_data['l1_name'], telemetry_data['l2_name'], title_suffix, line_shape='hv')
-        return no_update, delta_fig, speed_fig, gear_fig, no_update
+        throttle_fig = create_telemetry_plot(dist, throttle1, throttle2, "Throttle (%)", telemetry_data['l1_name'], telemetry_data['l2_name'], title_suffix)
+        return no_update, delta_fig, speed_fig, gear_fig, throttle_fig, no_update
 
     if triggered_id not in ['compare-btn-drivers', 'compare-btn-years']:
-        return create_empty_figure("Select options and click 'Compare'"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
+        return create_empty_figure("Select options and click 'Compare'"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
 
     try:
         if feature == 'drivers':
@@ -390,20 +394,24 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
         delta = resample_telemetry(common_dist, ref_tel['Distance'], delta_s, "Delta")
         speed1, gear1 = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['Speed'], f"{label1} Spd"), resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['nGear'], f"{label1} Gear")
         speed2, gear2 = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['Speed'], f"{label2} Spd"), resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['nGear'], f"{label2} Gear")
-        
+        throttle1 = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['Throttle'], f"{label1} Throttle")
+        throttle2 = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['Throttle'], f"{label2} Throttle")
+
         delta_fig, speed_fig, gear_fig = create_delta_plot(common_dist, delta, label1, label2), create_telemetry_plot(common_dist, speed1, speed2, "Speed (Km/h)", label1, label2), create_telemetry_plot(common_dist, gear1, gear2, "Gear", label1, label2, line_shape='hv')
+        throttle_fig = create_telemetry_plot(common_dist, throttle1, throttle2, "Throttle (%)", label1, label2)
 
         telemetry_store = {
             'ref_x': ref_merged['X'].tolist(), 'ref_y': ref_merged['Y'].tolist(), 'ref_dist': ref_merged['Distance'].tolist(),
             'cmp_x': cmp_merged['X'].tolist(), 'cmp_y': cmp_merged['Y'].tolist(), 'cmp_dist': cmp_merged['Distance'].tolist(),
             'common_dist': common_dist.tolist(), 'delta': delta.tolist(),
             'speed1': speed1.tolist(), 'gear1': gear1.tolist(), 'speed2': speed2.tolist(), 'gear2': gear2.tolist(),
+            'throttle1': throttle1.tolist(), 'throttle2': throttle2.tolist(),
             'l1_name': label1, 'l2_name': label2,
         }
-        return track_fig, delta_fig, speed_fig, gear_fig, telemetry_store
+        return track_fig, delta_fig, speed_fig, gear_fig, throttle_fig, telemetry_store
     except Exception as e:
         print(f"Error processing comparison: {e}")
-        return create_empty_figure(f"Error: {e}"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
+        return create_empty_figure(f"Error: {e}"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
 
 # --- Plotting Helper Functions ---
 def create_delta_plot(x, y, name1, name2, title_suffix=""):
