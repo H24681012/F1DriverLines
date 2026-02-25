@@ -140,11 +140,10 @@ app.layout = dbc.Container(
                 ),
                 dbc.Col(
                     [
-                        dcc.Loading(dcc.Graph(id='track-plot', config={'displayModeBar': True}), type="circle"),
-                        dcc.Loading(dcc.Graph(id='delta-plot', config={'displayModeBar': True}), type="circle"),
-                        dcc.Loading(dcc.Graph(id='speed-plot', config={'displayModeBar': True}), type="circle"),
-                        dcc.Loading(dcc.Graph(id='gear-plot', config={'displayModeBar': True}), type="circle"),
-                        dcc.Store(id='telemetry-data-store'),
+                        dcc.Loading(dcc.Graph(id='track-plot', config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
+                        dcc.Loading(dcc.Graph(id='delta-plot', config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
+                        dcc.Loading(dcc.Graph(id='speed-plot', config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
+                        dcc.Loading(dcc.Graph(id='gear-plot', config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
                     ],
                     width=9,
                 ),
@@ -189,86 +188,19 @@ create_driver_dropdown_callback('driver-years', 'year1-years', 'gp1-years', 'ses
 
 # --- Main Callback ---
 @app.callback(
-    [Output('track-plot', 'figure'), Output('delta-plot', 'figure'), Output('speed-plot', 'figure'), Output('gear-plot', 'figure'), Output('telemetry-data-store', 'data')],
-    [Input('compare-btn-drivers', 'n_clicks'), Input('compare-btn-years', 'n_clicks'), Input('track-plot', 'relayoutData')],
+    [Output('track-plot', 'figure'), Output('delta-plot', 'figure'), Output('speed-plot', 'figure'), Output('gear-plot', 'figure')],
+    [Input('compare-btn-drivers', 'n_clicks'), Input('compare-btn-years', 'n_clicks')],
     [State('feature-dropdown', 'value'),
      State('year-drivers', 'value'), State('gp-drivers', 'value'), State('session-type-drivers', 'value'), State('driver1-drivers', 'value'), State('driver2-drivers', 'value'),
      State('driver-years', 'value'), State('year1-years', 'value'), State('gp1-years', 'value'), State('session-type1-years', 'value'),
-     State('year2-years', 'value'), State('gp2-years', 'value'), State('session-type2-years', 'value'),
-     State('telemetry-data-store', 'data')]
+     State('year2-years', 'value'), State('gp2-years', 'value'), State('session-type2-years', 'value')]
 )
-def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, drv1, drv2, drv_y, y1, gp1, s1, y2, gp2, s2, telemetry_data):
+def compare(drv_clicks, yrs_clicks, feature, y_d, gp_d, s_d, drv1, drv2, drv_y, y1, gp1, s1, y2, gp2, s2):
     ctx = callback_context
     triggered_id = ctx.triggered_id.split('.')[0] if ctx.triggered_id else None
 
-    # --- CONSERVATIVE ZOOM LOGIC - MAINTAINS DELTA ACCURACY ---
-    if triggered_id == 'track-plot' and relayout and telemetry_data:
-        is_autoscale = 'xaxis.autorange' in relayout
-        if is_autoscale:
-            dist, delta = np.array(telemetry_data['common_dist']), np.array(telemetry_data['delta'])
-            speed1, speed2 = np.array(telemetry_data['speed1']), np.array(telemetry_data['speed2'])
-            gear1, gear2 = np.array(telemetry_data['gear1']), np.array(telemetry_data['gear2'])
-            title_suffix = ""
-        elif 'xaxis.range[0]' in relayout:
-            ref_x, ref_y, ref_dist = np.array(telemetry_data['ref_x']), np.array(telemetry_data['ref_y']), np.array(telemetry_data['ref_dist'])
-            cmp_x, cmp_y, cmp_dist = np.array(telemetry_data['cmp_x']), np.array(telemetry_data['cmp_y']), np.array(telemetry_data['cmp_dist'])
-            x_min, x_max, y_min, y_max = relayout['xaxis.range[0]'], relayout['xaxis.range[1]'], relayout['yaxis.range[0]'], relayout['yaxis.range[1]']
-
-            # Find points within the zoom box from BOTH drivers
-            ref_mask = (ref_x >= x_min) & (ref_x <= x_max) & (ref_y >= y_min) & (ref_y <= y_max)
-            cmp_mask = (cmp_x >= x_min) & (cmp_x <= x_max) & (cmp_y >= y_min) & (cmp_y <= y_max)
-
-            # Collect all matched distances from both drivers
-            matched_dists = np.concatenate([ref_dist[ref_mask], cmp_dist[cmp_mask]])
-            points_in_zoom = len(matched_dists)
-
-            if points_in_zoom >= 2:
-                min_dist, max_dist = matched_dists.min(), matched_dists.max()
-                title_suffix = " (Zoomed)"
-            elif points_in_zoom == 1:
-                center_dist = matched_dists[0]
-                padding = 15
-                min_dist = max(0, center_dist - padding)
-                max_dist = min(max(ref_dist.max(), cmp_dist.max()), center_dist + padding)
-                title_suffix = " (Point Focus)"
-            else:
-                # No points — find closest point across both drivers
-                center_x, center_y = (x_min + x_max) / 2, (y_min + y_max) / 2
-                ref_dists_to_center = np.sqrt((ref_x - center_x)**2 + (ref_y - center_y)**2)
-                cmp_dists_to_center = np.sqrt((cmp_x - center_x)**2 + (cmp_y - center_y)**2)
-                ref_closest = ref_dist[np.argmin(ref_dists_to_center)]
-                cmp_closest = cmp_dist[np.argmin(cmp_dists_to_center)]
-                closest_dist = ref_closest if ref_dists_to_center.min() < cmp_dists_to_center.min() else cmp_closest
-
-                padding = 20
-                max_track_dist = max(ref_dist.max(), cmp_dist.max())
-                min_dist = max(0, closest_dist - padding)
-                max_dist = min(max_track_dist, closest_dist + padding)
-                title_suffix = " (Nearest Point)"
-            
-            # Apply the distance filter to telemetry data
-            full_dist = np.array(telemetry_data['common_dist'])
-            zoom_mask = (full_dist >= min_dist) & (full_dist <= max_dist)
-            
-            if np.sum(zoom_mask) == 0:
-                return no_update, create_empty_figure("No telemetry in range"), create_empty_figure(""), create_empty_figure(""), no_update
-            
-            dist = full_dist[zoom_mask]
-            delta = np.array(telemetry_data['delta'])[zoom_mask]
-            speed1, speed2 = np.array(telemetry_data['speed1'])[zoom_mask], np.array(telemetry_data['speed2'])[zoom_mask]
-            gear1, gear2 = np.array(telemetry_data['gear1'])[zoom_mask], np.array(telemetry_data['gear2'])[zoom_mask]
-            
-        else: 
-            return no_update, no_update, no_update, no_update, no_update
-
-        delta_fig = create_delta_plot(dist, delta, telemetry_data['l1_name'], telemetry_data['l2_name'], title_suffix)
-        speed_fig = create_telemetry_plot(dist, speed1, speed2, "Speed (Km/h)", telemetry_data['l1_name'], telemetry_data['l2_name'], title_suffix)
-        gear_fig = create_telemetry_plot(dist, gear1, gear2, "Gear", telemetry_data['l1_name'], telemetry_data['l2_name'], title_suffix, line_shape='hv')
-        return no_update, delta_fig, speed_fig, gear_fig, no_update
-
-    # --- Comparison Logic ---
     if triggered_id not in ['compare-btn-drivers', 'compare-btn-years']:
-        return create_empty_figure("Select options and click 'Compare'"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
+        return create_empty_figure("Select options and click 'Compare'"), create_empty_figure(""), create_empty_figure(""), create_empty_figure("")
 
     try:
         if feature == 'drivers':
@@ -359,8 +291,29 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
             ]
         )
         track_fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
-        track_fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)', scaleanchor="x", scaleratio=1)
-        
+        track_fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
+
+        # --- TURN LABELS ---
+        try:
+            active_session = session if feature == 'drivers' else s1_obj
+            circuit_info = active_session.get_circuit_info()
+            if circuit_info is not None and hasattr(circuit_info, 'corners') and circuit_info.corners is not None:
+                corners = circuit_info.corners
+                for _, corner in corners.iterrows():
+                    label = f"T{int(corner['Number'])}"
+                    track_fig.add_annotation(
+                        x=corner['X'], y=corner['Y'],
+                        text=label,
+                        showarrow=False,
+                        font=dict(size=10, color='white', family='Arial Black'),
+                        bgcolor='rgba(255, 255, 255, 0.15)',
+                        bordercolor='rgba(255, 255, 255, 0.3)',
+                        borderwidth=1,
+                        borderpad=2,
+                    )
+        except Exception as e:
+            print(f"Could not add turn labels: {e}")
+
         # --- TELEMETRY --- FIXED: lap1 first, lap2 second
         delta_s, ref_tel, cmp_tel = delta_time(lap1, lap2)
         common_dist = ref_tel['Distance'].to_numpy()
@@ -370,25 +323,18 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
         speed2, gear2 = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['Speed'], f"{label2} Spd"), resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['nGear'], f"{label2} Gear")
         
         delta_fig, speed_fig, gear_fig = create_delta_plot(common_dist, delta, label1, label2), create_telemetry_plot(common_dist, speed1, speed2, "Speed (Km/h)", label1, label2), create_telemetry_plot(common_dist, gear1, gear2, "Gear", label1, label2, line_shape='hv')
-        
-        telemetry_store = {
-            'ref_x': ref_merged['X'].tolist(), 'ref_y': ref_merged['Y'].tolist(), 'ref_dist': ref_merged['Distance'].tolist(),
-            'cmp_x': cmp_merged['X'].tolist(), 'cmp_y': cmp_merged['Y'].tolist(), 'cmp_dist': cmp_merged['Distance'].tolist(),
-            'common_dist': common_dist.tolist(), 'delta': delta.tolist(),
-            'speed1': speed1.tolist(), 'gear1': gear1.tolist(), 'speed2': speed2.tolist(), 'gear2': gear2.tolist(),
-            'l1_name': label1, 'l2_name': label2,
-        }
-        return track_fig, delta_fig, speed_fig, gear_fig, telemetry_store
+
+        return track_fig, delta_fig, speed_fig, gear_fig
     except Exception as e:
         print(f"Error processing comparison: {e}")
-        return create_empty_figure(f"Error: {e}"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
+        return create_empty_figure(f"Error: {e}"), create_empty_figure(""), create_empty_figure(""), create_empty_figure("")
 
 # --- Plotting Helper Functions ---
 def create_delta_plot(x, y, name1, name2, title_suffix=""):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=y, mode='lines', line=dict(color='cyan'), name=f"Δt ({name2} vs {name1})"))
     if x.size > 0: fig.add_shape(type='line', x0=np.min(x), y0=0, x1=np.max(x), y1=0, line=dict(color='yellow', dash='dash', width=1))
-    fig.update_layout(title=f"Time Delta: {name2} vs {name1}{title_suffix}", xaxis_title='Distance (m)', yaxis_title='Time Delta (s)', template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR, margin=dict(l=40, r=20, t=60, b=40))
+    fig.update_layout(title=f"Time Delta: {name2} vs {name1}{title_suffix}", xaxis_title='Distance (m)', yaxis_title='Time Delta (s)', template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR, margin=dict(l=40, r=20, t=60, b=60), xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
     return fig
 
 def create_telemetry_plot(x, y1, y2, title, name1, name2, title_suffix="", line_shape='linear'):
