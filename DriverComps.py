@@ -257,16 +257,16 @@ def compare(drv_clicks, yrs_clicks, feature, y_d, gp_d, s_d, drv1, drv2, drv_y, 
             else:
                  track_fig.add_trace(go.Scatter(x=data['X'], y=data['Y'], mode='lines', line=dict(color=color, width=3, dash='dash'), name=f"{name} Line", legendgroup=name, showlegend=True))
             
-            track_fig.add_trace(go.Scatter(x=data.loc[starts, 'X'], y=data.loc[starts, 'Y'], mode='markers', marker=dict(symbol='circle-open', size=10, color=color), showlegend=False, name=f'{name}_bs', legendgroup=name))
-            track_fig.add_trace(go.Scatter(x=data.loc[ends, 'X'], y=data.loc[ends, 'Y'], mode='markers', marker=dict(symbol='circle', size=10, color=color), showlegend=False, name=f'{name}_be', legendgroup=name))
+            track_fig.add_trace(go.Scatter(x=data.loc[starts, 'X'], y=data.loc[starts, 'Y'], mode='markers', marker=dict(symbol='triangle-down', size=10, color='#ff4444', line=dict(color='white', width=1)), showlegend=False, name=f'{name}_bs', legendgroup=name))
+            track_fig.add_trace(go.Scatter(x=data.loc[ends, 'X'], y=data.loc[ends, 'Y'], mode='markers', marker=dict(symbol='triangle-up', size=10, color='#44dd44', line=dict(color='white', width=1)), showlegend=False, name=f'{name}_be', legendgroup=name))
         
         track_fig.add_trace(go.Scatter(x=[np.mean([ref_merged['X'].iloc[0], cmp_merged['X'].iloc[0]])], y=[np.mean([ref_merged['Y'].iloc[0], cmp_merged['Y'].iloc[0]])], mode='markers', marker=dict(symbol='star', size=15, color='yellow'), name="Lap Start"))
         
         # Add legend explanations
         track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', line=dict(color='gray', dash='dot'), name="Under Braking", showlegend=True))
         track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', line=dict(color='gray', dash='dash'), name="Throttle/Coast", showlegend=True))
-        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle-open', size=10, color='gray'), name="Brake Start", showlegend=True))
-        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle', size=10, color='gray'), name="Brake End", showlegend=True))
+        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-down', size=10, color='#ff4444', line=dict(color='white', width=1)), name="Brake Start", showlegend=True))
+        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='triangle-up', size=10, color='#44dd44', line=dict(color='white', width=1)), name="Brake End", showlegend=True))
         
         track_fig.update_layout(
             title_text='Racing Line (Geographic Orientation)', 
