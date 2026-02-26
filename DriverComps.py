@@ -1,5 +1,6 @@
 import dash
 from dash import dcc, html, Input, Output, State, no_update, callback_context, Patch
+from dash.exceptions import PreventUpdate
 import fastf1
 from fastf1.utils import delta_time
 import pandas as pd
@@ -15,40 +16,37 @@ from datetime import datetime
 required_version = (3, 3, 3)
 if tuple(map(int, fastf1.__version__.split('.'))) < required_version:
     sys.exit(
-        f"FastF1 version >= {'.'.join(map(str, required_version))} required, "
-        f"found {fastf1.__version__}. Please upgrade with 'pip install --upgrade fastf1'."
+        f"FastF1 >= {'.'.join(map(str, required_version))} required, "
+        f"found {fastf1.__version__}. Run: pip install --upgrade fastf1"
     )
 
-CACHE_DIR = 'cache'
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
-fastf1.Cache.enable_cache(CACHE_DIR)
+os.makedirs('cache', exist_ok=True)
+fastf1.Cache.enable_cache('cache')
 
-# --- App Setup ---
-app = dash.Dash(
-    __name__,
-    external_stylesheets=[dbc.themes.DARKLY],
-    suppress_callback_exceptions=True
-)
+# --- App ---
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY], suppress_callback_exceptions=True)
 server = app.server
 
-# --- Constants & Helpers ---
+# --- Constants ---
 _current_year = datetime.now().year
 _today = datetime.now()
 YEARS = list(range(2018, _current_year + 1))[::-1]
 try:
     _cur_schedule = fastf1.get_event_schedule(_current_year, include_testing=False)
-    _season_started = not _cur_schedule.empty and (_cur_schedule['EventDate'] < _today).any()
-    DEFAULT_YEAR = _current_year if _season_started else _current_year - 1
+    DEFAULT_YEAR = _current_year if (not _cur_schedule.empty and (_cur_schedule['EventDate'] < _today).any()) else _current_year - 1
 except Exception:
     DEFAULT_YEAR = _current_year - 1
-PLOT_TEMPLATE = 'plotly_dark'
-BG_COLOR = '#111111'
-DRIVER1_COLOR = 'blue'
-DRIVER2_COLOR = 'red'
-DROPDOWN_STYLE = {'color': 'black'}
 
-_session_cache = {}
+PLOT_TEMPLATE  = 'plotly_dark'
+BG_COLOR       = '#111111'
+DRIVER1_COLOR  = 'blue'
+DRIVER2_COLOR  = 'red'
+DROPDOWN_STYLE = {'color': 'black'}
+SESSIONS       = ['FP1', 'FP2', 'FP3', 'Q', 'Sprint Shootout', 'Sprint', 'R']
+BRAKE_DASH     = {'throttle': 'dash', 'brake': 'dot'}
+
+# --- Session Cache ---
+_session_cache    = {}
 _SESSION_CACHE_MAX = 8
 
 def get_session(year, gp, session_type, telemetry=True):
@@ -58,21 +56,35 @@ def get_session(year, gp, session_type, telemetry=True):
     try:
         session = fastf1.get_session(year, gp, session_type)
         session.load(telemetry=telemetry, laps=True, weather=False)
-        # Evict oldest entry if cache is full
         if len(_session_cache) >= _SESSION_CACHE_MAX:
-            oldest_key = next(iter(_session_cache))
-            del _session_cache[oldest_key]
+            del _session_cache[next(iter(_session_cache))]
         _session_cache[key] = session
         return session
     except Exception as e:
-        print(f"Error loading session for {year} {gp} {session_type}: {e}")
+        print(f"Error loading session {year} {gp} {session_type}: {e}")
         return None
 
 @functools.lru_cache(maxsize=16)
 def get_schedule(year):
     return fastf1.get_event_schedule(year, include_testing=False)
 
-def create_empty_figure(message):
+# --- Telemetry Helpers ---
+def resample_telemetry(target_dist, source_dist, source_vals):
+    target_dist  = np.asarray(target_dist)
+    source_dist  = np.asarray(source_dist)
+    source_vals  = np.asarray(source_vals, dtype=float)
+    n = len(target_dist)
+    if n == 0:
+        return np.array([])
+    if len(source_dist) != len(source_vals) or len(source_dist) == 0:
+        return np.full(n, np.nan)
+    unique_dist, unique_idx = np.unique(source_dist, return_index=True)
+    if len(unique_dist) < 2:
+        return np.full(n, source_vals[unique_idx[0]] if len(unique_dist) == 1 else np.nan)
+    return np.interp(target_dist, unique_dist, source_vals[unique_idx])
+
+# --- Plotting Helpers ---
+def create_empty_figure(message=""):
     fig = go.Figure()
     fig.update_layout(
         template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR,
@@ -82,337 +94,351 @@ def create_empty_figure(message):
     )
     return fig
 
-# --- RESTORED Resampling Helper from original code ---
-def resample_telemetry(target_dist_axis, source_dist_axis, source_values_axis, source_name="data"):
-    target_dist_axis = np.asarray(target_dist_axis)
-    source_dist_axis = np.asarray(source_dist_axis)
-    source_values_axis = np.asarray(source_values_axis, dtype=float)
-    L_target = len(target_dist_axis)
-    if L_target == 0: return np.array([])
-    if len(source_values_axis) == L_target and np.array_equal(source_dist_axis, target_dist_axis): return source_values_axis
-    if len(source_dist_axis) == 0 or len(source_values_axis) == 0: return np.full(L_target, np.nan)
-    if len(source_dist_axis) != len(source_values_axis): return np.full(L_target, np.nan)
-    unique_dist, unique_idx = np.unique(source_dist_axis, return_index=True)
-    if len(unique_dist) < 2:
-        if len(unique_dist) == 1 and L_target > 0: return np.full(L_target, source_values_axis[unique_idx[0]])
-        return np.full(L_target, np.nan)
-    return np.interp(target_dist_axis, unique_dist, source_values_axis[unique_idx])
+def create_delta_plot(x, y, name1, name2):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=y, mode='lines', line=dict(color='cyan'), name=f"Δt ({name2} vs {name1})"))
+    if x.size > 0:
+        fig.add_shape(type='line', x0=x.min(), y0=0, x1=x.max(), y1=0,
+                      line=dict(color='yellow', dash='dash', width=1))
+    fig.update_layout(
+        title=f"Time Delta: {name2} vs {name1}",
+        xaxis_title='Distance (m)', yaxis_title='Time Delta (s)',
+        template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR,
+        margin=dict(l=40, r=20, t=60, b=60),
+        xaxis=dict(rangeslider=dict(visible=True, thickness=0.08))
+    )
+    return fig
 
-# --- Control Creation Functions ---
+def create_telemetry_plot(x, y1, y2, title, name1, name2, line_shape='linear'):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=y1, mode='lines', name=name1,
+                             line=dict(color=DRIVER1_COLOR), line_shape=line_shape))
+    fig.add_trace(go.Scatter(x=x, y=y2, mode='lines', name=name2,
+                             line=dict(color=DRIVER2_COLOR), line_shape=line_shape))
+    fig.update_layout(
+        title=title, xaxis_title='Distance (m)', yaxis_title=title.split(' ')[0],
+        template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=40, r=20, t=60, b=40)
+    )
+    return fig
+
+# --- Layout ---
+def _dd(id_, **kw):
+    return dcc.Dropdown(id=id_, clearable=False, style=DROPDOWN_STYLE, **kw)
+
 def create_driver_controls():
     return html.Div([
         dbc.Label("Year", className="text-white mt-3"),
-        dcc.Dropdown(id='year-drivers', options=YEARS, value=DEFAULT_YEAR, clearable=False, style=DROPDOWN_STYLE),
+        _dd('year-drivers', options=YEARS, value=DEFAULT_YEAR),
         dbc.Label("Grand Prix", className="text-white mt-3"),
-        dcc.Dropdown(id='gp-drivers', clearable=False, style=DROPDOWN_STYLE),
+        _dd('gp-drivers'),
         dbc.Label("Session", className="text-white mt-3"),
-        dcc.Dropdown(id='session-type-drivers', options=['FP1','FP2','FP3','Q','Sprint Shootout','Sprint','R'], value='Q', clearable=False, style=DROPDOWN_STYLE),
+        _dd('session-type-drivers', options=SESSIONS, value='Q'),
         dbc.Label("Driver 1 (Reference)", className="text-white mt-3"),
-        dcc.Dropdown(id='driver1-drivers', clearable=False, style=DROPDOWN_STYLE),
+        _dd('driver1-drivers'),
         dbc.Label("Driver 2 (Comparison)", className="text-white mt-3"),
-        dcc.Dropdown(id='driver2-drivers', clearable=False, style=DROPDOWN_STYLE),
-        dbc.Button('Compare', id='compare-btn-drivers', color='primary', className='mt-3 w-100')
+        _dd('driver2-drivers'),
+        dbc.Button('Compare', id='compare-btn-drivers', color='primary', className='mt-3 w-100'),
     ])
 
 def create_year_controls():
     return html.Div([
         dbc.Label("Reference Driver (from Year 1)", className="text-white mt-3"),
-        dcc.Dropdown(id='driver-years', clearable=False, style=DROPDOWN_STYLE),
+        _dd('driver-years'),
         dbc.Label("Year 1 / GP 1 / Session 1", className="text-white mt-3"),
-        dcc.Dropdown(id='year1-years', options=YEARS, value=DEFAULT_YEAR, clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='gp1-years', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='session-type1-years', options=['FP1','FP2','FP3','Q','Sprint Shootout','Sprint','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
+        _dd('year1-years', options=YEARS, value=DEFAULT_YEAR),
+        _dd('gp1-years', className="mt-1"),
+        _dd('session-type1-years', options=SESSIONS, value='Q', className="mt-1"),
         dbc.Label("Year 2 / GP 2 / Session 2", className="text-white mt-3"),
-        dcc.Dropdown(id='year2-years', options=YEARS, value=DEFAULT_YEAR - 1, clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='gp2-years', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
-        dcc.Dropdown(id='session-type2-years', options=['FP1','FP2','FP3','Q','Sprint Shootout','Sprint','R'], value='Q', className="mt-1", clearable=False, style=DROPDOWN_STYLE),
-        dbc.Button('Compare', id='compare-btn-years', color='primary', className='mt-3 w-100')
+        _dd('year2-years', options=YEARS, value=DEFAULT_YEAR - 1),
+        _dd('gp2-years', className="mt-1"),
+        _dd('session-type2-years', options=SESSIONS, value='Q', className="mt-1"),
+        dbc.Button('Compare', id='compare-btn-years', color='primary', className='mt-3 w-100'),
     ])
 
-# --- Layout ---
-app.layout = dbc.Container(
-    [
-        html.H2("F1 Telemetry Comparator", className="text-white my-3 text-center"),
-        dbc.Row(
-            [
-                dbc.Col(
-                    [
-                        dbc.Label("Comparison Mode", className="text-white"),
-                        dcc.Dropdown(id='feature-dropdown', options=[{'label': 'Compare Drivers (Same Year)', 'value': 'drivers'}, {'label': 'Compare Years (Same Driver)', 'value': 'years'}], value='drivers', clearable=False, style=DROPDOWN_STYLE),
-                        html.Div(id='drivers-controls-container', children=create_driver_controls(), style={'display': 'block'}),
-                        html.Div(id='years-controls-container', children=create_year_controls(), style={'display': 'none'}),
-                    ],
-                    width=3,
-                ),
-                dbc.Col(
-                    [
-                        dcc.Loading(dcc.Graph(id='track-plot', figure=create_empty_figure("Select options and click 'Compare'"), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
-                        dcc.Loading(dcc.Graph(id='delta-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
-                        dcc.Loading(dcc.Graph(id='speed-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
-                        dcc.Loading(dcc.Graph(id='gear-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
-                        dcc.Loading(dcc.Graph(id='throttle-plot', figure=create_empty_figure(""), config={'displayModeBar': True, 'scrollZoom': True}), type="circle"),
-                    ],
-                    width=9,
-                ),
-            ]
-        ),
-    ],
-    fluid=True,
-    style={'backgroundColor': BG_COLOR, 'padding': '20px'},
-)
+_GRAPH_CONFIG = {'displayModeBar': True, 'scrollZoom': True}
+
+app.layout = dbc.Container([
+    html.H2("F1 Telemetry Comparator", className="text-white my-3 text-center"),
+    dbc.Row([
+        dbc.Col([
+            dbc.Label("Comparison Mode", className="text-white"),
+            dcc.Dropdown(
+                id='feature-dropdown',
+                options=[
+                    {'label': 'Compare Drivers (Same Year)', 'value': 'drivers'},
+                    {'label': 'Compare Years (Same Driver)',  'value': 'years'},
+                ],
+                value='drivers', clearable=False, style=DROPDOWN_STYLE,
+            ),
+            html.Div(id='drivers-controls-container', children=create_driver_controls()),
+            html.Div(id='years-controls-container',  children=create_year_controls(), style={'display': 'none'}),
+        ], width=3),
+        dbc.Col([
+            dcc.Loading(dcc.Graph(id='track-plot',    figure=create_empty_figure("Select options and click 'Compare'"), config=_GRAPH_CONFIG), type="circle"),
+            dcc.Loading(dcc.Graph(id='delta-plot',    figure=create_empty_figure(), config=_GRAPH_CONFIG), type="circle"),
+            dcc.Loading(dcc.Graph(id='speed-plot',    figure=create_empty_figure(), config=_GRAPH_CONFIG), type="circle"),
+            dcc.Loading(dcc.Graph(id='gear-plot',     figure=create_empty_figure(), config=_GRAPH_CONFIG), type="circle"),
+            dcc.Loading(dcc.Graph(id='throttle-plot', figure=create_empty_figure(), config=_GRAPH_CONFIG), type="circle"),
+        ], width=9),
+    ]),
+], fluid=True, style={'backgroundColor': BG_COLOR, 'padding': '20px'})
 
 # --- Control Callbacks ---
-@app.callback([Output('drivers-controls-container', 'style'), Output('years-controls-container', 'style')], Input('feature-dropdown', 'value'), prevent_initial_call=True)
+@app.callback(
+    [Output('drivers-controls-container', 'style'), Output('years-controls-container', 'style')],
+    Input('feature-dropdown', 'value'),
+    prevent_initial_call=True,
+)
 def toggle_control_panels(feature):
-    return ({'display': 'block'}, {'display': 'none'}) if feature == 'drivers' else ({'display': 'none'}, {'display': 'block'})
+    show, hide = {'display': 'block'}, {'display': 'none'}
+    return (show, hide) if feature == 'drivers' else (hide, show)
 
 # --- Dynamic Dropdown Callbacks ---
 def create_gp_dropdown_callback(output_id, year_id):
     @app.callback([Output(output_id, 'options'), Output(output_id, 'value')], Input(year_id, 'value'))
-    def update_gp_dropdown(year):
-        if not year: return [], None
-        schedule = get_schedule(year)
-        options = [{'label': name, 'value': name} for name in schedule['EventName']]
-        return options, options[-1]['value'] if options else None
+    def _cb(year):
+        if not year:
+            return [], None
+        options = [{'label': n, 'value': n} for n in get_schedule(year)['EventName']]
+        return options, (options[-1]['value'] if options else None)
 
 def create_driver_dropdown_callback(output_id, year_id, gp_id, session_id):
     @app.callback(Output(output_id, 'options'), [Input(year_id, 'value'), Input(gp_id, 'value'), Input(session_id, 'value')])
-    def update_driver_dropdown(year, gp, session_type):
-        if not all([year, gp, session_type]): return []
+    def _cb(year, gp, session_type):
+        if not all([year, gp, session_type]):
+            return []
         try:
             session = get_session(year, gp, session_type, telemetry=False)
             drivers = session.laps['Driver'].unique() if session and session.laps is not None else []
-            return [{'label': driver, 'value': driver} for driver in sorted(drivers)]
+            return [{'label': d, 'value': d} for d in sorted(drivers)]
         except Exception as e:
             print(f"Could not load drivers for {year} {gp} {session_type}: {e}")
             return []
 
-create_gp_dropdown_callback('gp-drivers', 'year-drivers')
-create_gp_dropdown_callback('gp1-years', 'year1-years')
-create_gp_dropdown_callback('gp2-years', 'year2-years')
-create_driver_dropdown_callback('driver1-drivers', 'year-drivers', 'gp-drivers', 'session-type-drivers')
-create_driver_dropdown_callback('driver2-drivers', 'year-drivers', 'gp-drivers', 'session-type-drivers')
-create_driver_dropdown_callback('driver-years', 'year1-years', 'gp1-years', 'session-type1-years')
+create_gp_dropdown_callback('gp-drivers',  'year-drivers')
+create_gp_dropdown_callback('gp1-years',   'year1-years')
+create_gp_dropdown_callback('gp2-years',   'year2-years')
+create_driver_dropdown_callback('driver1-drivers', 'year-drivers',  'gp-drivers',  'session-type-drivers')
+create_driver_dropdown_callback('driver2-drivers', 'year-drivers',  'gp-drivers',  'session-type-drivers')
+create_driver_dropdown_callback('driver-years',    'year1-years',   'gp1-years',   'session-type1-years')
 
-# --- Main Callback ---
+# --- Main Comparison Callback ---
 @app.callback(
-    [Output('track-plot', 'figure'), Output('delta-plot', 'figure'), Output('speed-plot', 'figure'), Output('gear-plot', 'figure'), Output('throttle-plot', 'figure')],
+    [Output('track-plot', 'figure'), Output('delta-plot', 'figure'), Output('speed-plot', 'figure'),
+     Output('gear-plot', 'figure'),  Output('throttle-plot', 'figure')],
     [Input('compare-btn-drivers', 'n_clicks'), Input('compare-btn-years', 'n_clicks')],
     [State('feature-dropdown', 'value'),
-     State('year-drivers', 'value'), State('gp-drivers', 'value'), State('session-type-drivers', 'value'), State('driver1-drivers', 'value'), State('driver2-drivers', 'value'),
-     State('driver-years', 'value'), State('year1-years', 'value'), State('gp1-years', 'value'), State('session-type1-years', 'value'),
+     State('year-drivers', 'value'), State('gp-drivers', 'value'), State('session-type-drivers', 'value'),
+     State('driver1-drivers', 'value'), State('driver2-drivers', 'value'),
+     State('driver-years', 'value'),
+     State('year1-years', 'value'), State('gp1-years', 'value'), State('session-type1-years', 'value'),
      State('year2-years', 'value'), State('gp2-years', 'value'), State('session-type2-years', 'value')],
-    prevent_initial_call=True
+    prevent_initial_call=True,
 )
-def compare(drv_clicks, yrs_clicks, feature, y_d, gp_d, s_d, drv1, drv2, drv_y, y1, gp1, s1, y2, gp2, s2):
-    ctx = callback_context
-    triggered_id = ctx.triggered_id.split('.')[0] if ctx.triggered_id else None
-
-    if triggered_id not in ['compare-btn-drivers', 'compare-btn-years']:
-        return create_empty_figure("Select options and click 'Compare'"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), create_empty_figure("")
+def compare(drv_clicks, yrs_clicks, feature,
+            y_d, gp_d, s_d, drv1, drv2,
+            drv_y, y1, gp1, s1, y2, gp2, s2):
+    triggered_id = callback_context.triggered_id
+    if triggered_id not in ('compare-btn-drivers', 'compare-btn-years'):
+        raise PreventUpdate
 
     try:
         if feature == 'drivers':
-            if not all([y_d, gp_d, s_d, drv1, drv2]): raise ValueError("Please select all driver options.")
+            if not all([y_d, gp_d, s_d, drv1, drv2]):
+                raise ValueError("Please select all driver options.")
             session = get_session(y_d, gp_d, s_d)
-            if session is None: raise ValueError(f"Failed to load session: {y_d} {gp_d} {s_d}")
+            if session is None:
+                raise ValueError(f"Failed to load session: {y_d} {gp_d} {s_d}")
             lap1 = session.laps.pick_driver(drv1).pick_fastest()
             lap2 = session.laps.pick_driver(drv2).pick_fastest()
-            if lap1 is None: raise ValueError(f"No lap data found for {drv1}.")
-            if lap2 is None: raise ValueError(f"No lap data found for {drv2}.")
+            if lap1 is None: raise ValueError(f"No lap data for {drv1}.")
+            if lap2 is None: raise ValueError(f"No lap data for {drv2}.")
             label1, label2 = drv1, drv2
         else:
-            if not all([drv_y, y1, gp1, s1, y2, gp2, s2]): raise ValueError("Please select all year options.")
-            gp_to_use, session_to_use = gp1, s1
-            s1_obj = get_session(y1, gp_to_use, session_to_use)
-            s2_obj = get_session(y2, gp_to_use, session_to_use)
-            if s1_obj is None: raise ValueError(f"Failed to load session: {y1} {gp_to_use} {session_to_use}")
-            if s2_obj is None: raise ValueError(f"Failed to load session: {y2} {gp_to_use} {session_to_use}")
+            if not all([drv_y, y1, gp1, s1, y2, gp2, s2]):
+                raise ValueError("Please select all year options.")
+            s1_obj = get_session(y1, gp1, s1)
+            s2_obj = get_session(y2, gp1, s1)
+            if s1_obj is None: raise ValueError(f"Failed to load session: {y1} {gp1} {s1}")
+            if s2_obj is None: raise ValueError(f"Failed to load session: {y2} {gp1} {s1}")
             lap1 = s1_obj.laps.pick_driver(drv_y).pick_fastest()
             lap2 = s2_obj.laps.pick_driver(drv_y).pick_fastest()
-            if lap1 is None: raise ValueError(f"No lap data for {drv_y} in {y1} {gp_to_use}.")
-            if lap2 is None: raise ValueError(f"No lap data for {drv_y} in {y2} {gp_to_use}.")
+            if lap1 is None: raise ValueError(f"No lap data for {drv_y} in {y1} {gp1}.")
+            if lap2 is None: raise ValueError(f"No lap data for {drv_y} in {y2} {gp1}.")
             label1, label2 = f"{drv_y} ({y1})", f"{drv_y} ({y2})"
 
-        if pd.isna(lap1.LapTime) or pd.isna(lap2.LapTime): raise ValueError("A selected lap has no time set.")
-        
-        # --- RACING LINE PLOT ---
-        track_fig = go.Figure()
-        dmap = {'throttle': 'dash', 'brake': 'dot'}
+        if pd.isna(lap1.LapTime) or pd.isna(lap2.LapTime):
+            raise ValueError("A selected lap has no time set.")
+
+        # --- Racing Line ---
         ref_merged = pd.merge_asof(
             lap1.get_car_data().add_distance().sort_values('Time'),
             lap1.get_pos_data().sort_values('Time'),
-            on='Time', direction='nearest'
-        ).dropna(subset=['X','Y','Distance']).reset_index(drop=True)
+            on='Time', direction='nearest',
+        ).dropna(subset=['X', 'Y', 'Distance']).reset_index(drop=True)
         cmp_merged = pd.merge_asof(
             lap2.get_car_data().add_distance().sort_values('Time'),
             lap2.get_pos_data().sort_values('Time'),
-            on='Time', direction='nearest'
-        ).dropna(subset=['X','Y','Distance']).reset_index(drop=True)
+            on='Time', direction='nearest',
+        ).dropna(subset=['X', 'Y', 'Distance']).reset_index(drop=True)
 
+        track_fig = go.Figure()
         for name, data, color in [(label1, ref_merged, DRIVER1_COLOR), (label2, cmp_merged, DRIVER2_COLOR)]:
-            is_brake = data['Brake'] > 0
-            prev_is_brake = is_brake.shift(fill_value=False)
-            starts, ends = data.index[~prev_is_brake & is_brake], data.index[prev_is_brake & ~is_brake]
-            starts_set = set(starts.tolist())
-            bounds = sorted(list(set([0] + starts.tolist() + ends.tolist() + [len(data)-1])))
+            is_brake    = data['Brake'] > 0
+            starts      = data.index[~is_brake.shift(fill_value=False) & is_brake]
+            ends        = data.index[is_brake.shift(fill_value=False) & ~is_brake]
+            starts_set  = set(starts.tolist())
+            bounds      = sorted(set([0] + starts.tolist() + ends.tolist() + [len(data) - 1]))
 
+            hover = 'Dist: %{customdata[0]:.0f}m<br>Speed: %{customdata[1]:.0f} km/h<br>Gear: %{customdata[2]:.0f}<extra>%{fullData.name}</extra>'
             if len(bounds) > 1:
                 for i in range(len(bounds) - 1):
-                    start, end = bounds[i], bounds[i+1]
-                    if start >= end: continue
-                    seg_type = 'brake' if start in starts_set else 'throttle'
-                    seg = data.iloc[start:end+1]
-                    track_fig.add_trace(go.Scatter(x=seg['X'], y=seg['Y'], mode='lines', line=dict(color=color, width=3, dash=dmap[seg_type]), name=f"{name} Line", legendgroup=name, showlegend=(i==0), customdata=np.column_stack([seg['Distance'], seg['Speed'], seg['nGear']]), hovertemplate='Dist: %{customdata[0]:.0f}m<br>Speed: %{customdata[1]:.0f} km/h<br>Gear: %{customdata[2]:.0f}<extra>%{fullData.name}</extra>'))
+                    start, end = bounds[i], bounds[i + 1]
+                    if start >= end:
+                        continue
+                    seg = data.iloc[start:end + 1]
+                    dash = BRAKE_DASH['brake' if start in starts_set else 'throttle']
+                    track_fig.add_trace(go.Scatter(
+                        x=seg['X'], y=seg['Y'], mode='lines',
+                        line=dict(color=color, width=3, dash=dash),
+                        name=f"{name} Line", legendgroup=name, showlegend=(i == 0),
+                        customdata=np.column_stack([seg['Distance'], seg['Speed'], seg['nGear']]),
+                        hovertemplate=hover,
+                    ))
             else:
-                 track_fig.add_trace(go.Scatter(x=data['X'], y=data['Y'], mode='lines', line=dict(color=color, width=3, dash='dash'), name=f"{name} Line", legendgroup=name, showlegend=True, customdata=np.column_stack([data['Distance'], data['Speed'], data['nGear']]), hovertemplate='Dist: %{customdata[0]:.0f}m<br>Speed: %{customdata[1]:.0f} km/h<br>Gear: %{customdata[2]:.0f}<extra>%{fullData.name}</extra>'))
-            
-            track_fig.add_trace(go.Scatter(x=data.loc[starts, 'X'], y=data.loc[starts, 'Y'], mode='markers', marker=dict(symbol='circle-open', size=11, color=color, line=dict(color=color, width=2.5)), showlegend=False, name=f'{name}_bs', legendgroup=name))
-            track_fig.add_trace(go.Scatter(x=data.loc[ends, 'X'], y=data.loc[ends, 'Y'], mode='markers', marker=dict(symbol='circle', size=11, color=color, line=dict(color='white', width=1.5)), showlegend=False, name=f'{name}_be', legendgroup=name))
-        
-        track_fig.add_trace(go.Scatter(x=[np.mean([ref_merged['X'].iloc[0], cmp_merged['X'].iloc[0]])], y=[np.mean([ref_merged['Y'].iloc[0], cmp_merged['Y'].iloc[0]])], mode='markers', marker=dict(symbol='star', size=15, color='yellow'), name="Lap Start"))
-        
-        # Add legend explanations
-        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', line=dict(color='gray', dash='dot'), name="Under Braking", showlegend=True))
-        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', line=dict(color='gray', dash='dash'), name="Throttle/Coast", showlegend=True))
+                track_fig.add_trace(go.Scatter(
+                    x=data['X'], y=data['Y'], mode='lines',
+                    line=dict(color=color, width=3, dash='dash'),
+                    name=f"{name} Line", legendgroup=name, showlegend=True,
+                    customdata=np.column_stack([data['Distance'], data['Speed'], data['nGear']]),
+                    hovertemplate=hover,
+                ))
+
+            track_fig.add_trace(go.Scatter(
+                x=data.loc[starts, 'X'], y=data.loc[starts, 'Y'], mode='markers',
+                marker=dict(symbol='circle-open', size=11, color=color, line=dict(color=color, width=2.5)),
+                showlegend=False, name=f'{name}_bs', legendgroup=name,
+            ))
+            track_fig.add_trace(go.Scatter(
+                x=data.loc[ends, 'X'], y=data.loc[ends, 'Y'], mode='markers',
+                marker=dict(symbol='circle', size=11, color=color, line=dict(color='white', width=1.5)),
+                showlegend=False, name=f'{name}_be', legendgroup=name,
+            ))
+
+        # Lap start marker
+        track_fig.add_trace(go.Scatter(
+            x=[np.mean([ref_merged['X'].iloc[0], cmp_merged['X'].iloc[0]])],
+            y=[np.mean([ref_merged['Y'].iloc[0], cmp_merged['Y'].iloc[0]])],
+            mode='markers', marker=dict(symbol='star', size=15, color='yellow'), name="Lap Start",
+        ))
+        # Legend key
+        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines',   line=dict(color='gray', dash='dot'),  name="Under Braking",          showlegend=True))
+        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines',   line=dict(color='gray', dash='dash'), name="Throttle/Coast",          showlegend=True))
         track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle-open', size=10, color='gray', line=dict(color='gray', width=2.5)), name="Brake Start (driver colour)", showlegend=True))
-        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle', size=10, color='gray', line=dict(color='white', width=1.5)), name="Brake End (driver colour)", showlegend=True))
-        
+        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle',      size=10, color='gray', line=dict(color='white', width=1.5)), name="Brake End (driver colour)",   showlegend=True))
+
         track_fig.update_layout(
-            title_text='Racing Line (Geographic Orientation)', 
-            template=PLOT_TEMPLATE, 
-            paper_bgcolor=BG_COLOR, 
-            plot_bgcolor=BG_COLOR, 
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), 
-            margin=dict(l=40, r=40, t=80, b=40), 
-            xaxis_title="X (m)",
-            yaxis_title="Y (m)",
-            yaxis=dict(),
-            annotations=[
-                dict(
-                    text="Note: Track shown in actual GPS orientation, not broadcast TV layout",
-                    xref="paper", yref="paper",
-                    x=0.02, y=0.98,
-                    showarrow=False,
-                    font=dict(size=10, color="lightgray"),
-                    bgcolor="rgba(0,0,0,0.5)",
-                    bordercolor="gray",
-                    borderwidth=1
-                )
-            ]
+            title_text='Racing Line (Geographic Orientation)',
+            template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(l=40, r=40, t=80, b=40),
+            xaxis_title="X (m)", yaxis_title="Y (m)",
+            annotations=[dict(
+                text="Note: Track shown in actual GPS orientation, not broadcast TV layout",
+                xref="paper", yref="paper", x=0.02, y=0.98, showarrow=False,
+                font=dict(size=10, color="lightgray"),
+                bgcolor="rgba(0,0,0,0.5)", bordercolor="gray", borderwidth=1,
+            )],
         )
         track_fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
         track_fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
 
-        # --- TURN LABELS ---
+        # Turn labels — placed radially outward from the track centroid
         try:
             active_session = session if feature == 'drivers' else s1_obj
             circuit_info = active_session.get_circuit_info()
-            if circuit_info is not None and hasattr(circuit_info, 'corners') and circuit_info.corners is not None:
-                corners = circuit_info.corners
-                # Centroid of the full track for radial outward placement
+            if circuit_info is not None and getattr(circuit_info, 'corners', None) is not None:
                 cx = np.concatenate([ref_merged['X'].values, cmp_merged['X'].values]).mean()
                 cy = np.concatenate([ref_merged['Y'].values, cmp_merged['Y'].values]).mean()
-                for _, corner in corners.iterrows():
-                    dx = corner['X'] - cx
-                    dy = corner['Y'] - cy
-                    dist = np.sqrt(dx**2 + dy**2)
-                    if dist == 0:
+                for _, corner in circuit_info.corners.iterrows():
+                    dx, dy = corner['X'] - cx, corner['Y'] - cy
+                    d = np.hypot(dx, dy)
+                    if d == 0:
                         continue
-                    # Push label outward from track centre — 55px in the radial direction
-                    offset_px = 55
-                    ax_off = (dx / dist) * offset_px
-                    ay_off = -(dy / dist) * offset_px  # Plotly ay: negative = up on screen
+                    off = 55 / d
                     track_fig.add_annotation(
                         x=corner['X'], y=corner['Y'],
                         text=f"T{int(corner['Number'])}",
-                        showarrow=True,
-                        arrowhead=0,
-                        arrowwidth=1,
+                        showarrow=True, arrowhead=0, arrowwidth=1,
                         arrowcolor='rgba(255,255,255,0.2)',
-                        ax=ax_off, ay=ay_off,
+                        ax=dx * off, ay=-(dy * off),
                         font=dict(size=9, color='rgba(220,220,220,0.85)'),
                         bgcolor='rgba(0,0,0,0.55)',
                         bordercolor='rgba(255,255,255,0.15)',
-                        borderwidth=1,
-                        borderpad=2,
+                        borderwidth=1, borderpad=2,
                     )
         except Exception as e:
             print(f"Could not add turn labels: {e}")
 
-        # --- TELEMETRY --- FIXED: lap1 first, lap2 second
+        # --- Telemetry ---
         delta_s, ref_tel, cmp_tel = delta_time(lap1, lap2)
         common_dist = ref_tel['Distance'].to_numpy()
-        
-        delta = resample_telemetry(common_dist, ref_tel['Distance'], delta_s, "Delta")
-        speed1, gear1 = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['Speed'], f"{label1} Spd"), resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['nGear'], f"{label1} Gear")
-        speed2, gear2 = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['Speed'], f"{label2} Spd"), resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['nGear'], f"{label2} Gear")
-        throttle1 = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['Throttle'], f"{label1} Throttle")
-        throttle2 = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['Throttle'], f"{label2} Throttle")
 
-        delta_fig, speed_fig, gear_fig = create_delta_plot(common_dist, delta, label1, label2), create_telemetry_plot(common_dist, speed1, speed2, "Speed (Km/h)", label1, label2), create_telemetry_plot(common_dist, gear1, gear2, "Gear", label1, label2, line_shape='hv')
+        delta    = resample_telemetry(common_dist, ref_tel['Distance'], delta_s)
+        speed1   = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['Speed'])
+        speed2   = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['Speed'])
+        gear1    = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['nGear'])
+        gear2    = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['nGear'])
+        throttle1 = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['Throttle'])
+        throttle2 = resample_telemetry(common_dist, cmp_tel['Distance'], cmp_tel['Throttle'])
+
+        delta_fig    = create_delta_plot(common_dist, delta, label1, label2)
+        speed_fig    = create_telemetry_plot(common_dist, speed1,    speed2,    "Speed (Km/h)", label1, label2)
+        gear_fig     = create_telemetry_plot(common_dist, gear1,     gear2,     "Gear",         label1, label2, line_shape='hv')
         throttle_fig = create_telemetry_plot(common_dist, throttle1, throttle2, "Throttle (%)", label1, label2)
 
         return track_fig, delta_fig, speed_fig, gear_fig, throttle_fig
+
     except Exception as e:
-        print(f"Error processing comparison: {e}")
-        return create_empty_figure(f"Error: {e}"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), create_empty_figure("")
+        print(f"Comparison error: {e}")
+        empty = create_empty_figure(f"Error: {e}")
+        return empty, create_empty_figure(), create_empty_figure(), create_empty_figure(), create_empty_figure()
+
 
 # --- Linked Zoom: drag-zoom on any telemetry plot syncs all others ---
 _TELEMETRY_PLOTS = ['delta-plot', 'speed-plot', 'gear-plot', 'throttle-plot']
 
+def _xaxis_patch(**kwargs):
+    p = Patch()
+    for k, v in kwargs.items():
+        p['layout']['xaxis'][k] = v
+    return p
+
 @app.callback(
     [Output(pid, 'figure', allow_duplicate=True) for pid in _TELEMETRY_PLOTS],
     [Input(pid, 'relayoutData') for pid in _TELEMETRY_PLOTS],
-    prevent_initial_call=True
+    prevent_initial_call=True,
 )
 def sync_telemetry_zoom(delta_rl, speed_rl, gear_rl, throttle_rl):
-    ctx = callback_context
-    triggered_id = ctx.triggered_id
+    triggered_id = callback_context.triggered_id
     if not triggered_id:
-        return [no_update] * 4
-    all_rl = dict(zip(_TELEMETRY_PLOTS, [delta_rl, speed_rl, gear_rl, throttle_rl]))
-    triggered_rl = all_rl.get(triggered_id) or {}
+        raise PreventUpdate
 
-    if 'xaxis.range[0]' in triggered_rl:
-        x0, x1 = triggered_rl['xaxis.range[0]'], triggered_rl['xaxis.range[1]']
-        result = []
-        for pid in _TELEMETRY_PLOTS:
-            if pid == triggered_id:
-                result.append(no_update)
-            else:
-                p = Patch()
-                p['layout']['xaxis']['range'] = [x0, x1]
-                p['layout']['xaxis']['autorange'] = False
-                result.append(p)
-        return result
-    elif 'xaxis.autorange' in triggered_rl or 'autosize' in triggered_rl:
-        result = []
-        for pid in _TELEMETRY_PLOTS:
-            if pid == triggered_id:
-                result.append(no_update)
-            else:
-                p = Patch()
-                p['layout']['xaxis']['autorange'] = True
-                result.append(p)
-        return result
-    return [no_update] * 4
+    rl = dict(zip(_TELEMETRY_PLOTS, [delta_rl, speed_rl, gear_rl, throttle_rl])).get(triggered_id) or {}
 
+    if 'xaxis.range[0]' in rl:
+        x0, x1 = rl['xaxis.range[0]'], rl['xaxis.range[1]']
+        return [no_update if pid == triggered_id else _xaxis_patch(range=[x0, x1], autorange=False)
+                for pid in _TELEMETRY_PLOTS]
 
-# --- Plotting Helper Functions ---
-def create_delta_plot(x, y, name1, name2, title_suffix=""):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, mode='lines', line=dict(color='cyan'), name=f"Δt ({name2} vs {name1})"))
-    if x.size > 0: fig.add_shape(type='line', x0=np.min(x), y0=0, x1=np.max(x), y1=0, line=dict(color='yellow', dash='dash', width=1))
-    fig.update_layout(title=f"Time Delta: {name2} vs {name1}{title_suffix}", xaxis_title='Distance (m)', yaxis_title='Time Delta (s)', template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR, margin=dict(l=40, r=20, t=60, b=60), xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)))
-    return fig
+    if 'xaxis.autorange' in rl or 'autosize' in rl:
+        return [no_update if pid == triggered_id else _xaxis_patch(autorange=True)
+                for pid in _TELEMETRY_PLOTS]
 
-def create_telemetry_plot(x, y1, y2, title, name1, name2, title_suffix="", line_shape='linear'):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y1, mode='lines', name=name1, line=dict(color=DRIVER1_COLOR), line_shape=line_shape))
-    fig.add_trace(go.Scatter(x=x, y=y2, mode='lines', name=name2, line=dict(color=DRIVER2_COLOR), line_shape=line_shape))
-    fig.update_layout(title=f"{title}{title_suffix}", xaxis_title='Distance (m)', yaxis_title=title.split(' ')[0], template=PLOT_TEMPLATE, paper_bgcolor=BG_COLOR, plot_bgcolor=BG_COLOR, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(l=40, r=20, t=60, b=40))
-    return fig
+    raise PreventUpdate
+
 
 if __name__ == '__main__':
     app.run(debug=True)
