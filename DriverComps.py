@@ -84,6 +84,20 @@ def resample_telemetry(target_dist, source_dist, source_vals):
     return np.interp(target_dist, unique_dist, source_vals[unique_idx])
 
 # --- Plotting Helpers ---
+def _best_label_position(cx, cy, track_x, track_y, offset, n_angles=24):
+    """Return (lx, ly) at distance `offset` from (cx, cy) in the direction
+    that maximises the minimum clearance from any track point."""
+    angles = np.linspace(0, 2 * np.pi, n_angles, endpoint=False)
+    best_clearance, best_lx, best_ly = -1.0, cx, cy + offset
+    for a in angles:
+        lx = cx + np.cos(a) * offset
+        ly = cy + np.sin(a) * offset
+        clearance = float(np.min(np.hypot(track_x - lx, track_y - ly)))
+        if clearance > best_clearance:
+            best_clearance, best_lx, best_ly = clearance, lx, ly
+    return best_lx, best_ly
+
+
 def create_empty_figure(message=""):
     fig = go.Figure()
     fig.update_layout(
@@ -356,52 +370,67 @@ def compare(drv_clicks, yrs_clicks, feature,
         track_fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
         track_fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
 
-        # Turn labels + clickable corner markers
+        # Turn labels — clickable buttons placed in the clearest space near each corner
         corner_store = None
         try:
             active_session = session if feature == 'drivers' else s1_obj
             circuit_info = active_session.get_circuit_info()
             if circuit_info is not None and getattr(circuit_info, 'corners', None) is not None:
                 corners_df = circuit_info.corners
-                cx = np.concatenate([ref_merged['X'].values, cmp_merged['X'].values]).mean()
-                cy = np.concatenate([ref_merged['Y'].values, cmp_merged['Y'].values]).mean()
 
+                # Combined track points used for clearance checks
+                all_tx = np.concatenate([ref_merged['X'].values, cmp_merged['X'].values])
+                all_ty = np.concatenate([ref_merged['Y'].values, cmp_merged['Y'].values])
+
+                # Label offset in data-coords: 6 % of the shorter track dimension, min 150 m
+                x_ext = float(all_tx.max() - all_tx.min())
+                y_ext = float(all_ty.max() - all_ty.min())
+                offset = float(np.clip(min(x_ext, y_ext) * 0.06, 150, 500))
+
+                label_xs, label_ys = [], []
+                conn_x,  conn_y   = [], []
                 for _, corner in corners_df.iterrows():
-                    dx, dy = corner['X'] - cx, corner['Y'] - cy
-                    d = np.hypot(dx, dy)
-                    if d == 0:
-                        continue
-                    off = 55 / d
-                    track_fig.add_annotation(
-                        x=corner['X'], y=corner['Y'],
-                        text=f"T{int(corner['Number'])}",
-                        showarrow=True, arrowhead=0, arrowwidth=1,
-                        arrowcolor='rgba(255,255,255,0.2)',
-                        ax=dx * off, ay=-(dy * off),
-                        font=dict(size=9, color='rgba(220,220,220,0.85)'),
-                        bgcolor='rgba(0,0,0,0.55)',
-                        bordercolor='rgba(255,255,255,0.15)',
-                        borderwidth=1, borderpad=2,
+                    lx, ly = _best_label_position(
+                        corner['X'], corner['Y'], all_tx, all_ty, offset
                     )
+                    label_xs.append(lx)
+                    label_ys.append(ly)
+                    conn_x += [corner['X'], lx, None]
+                    conn_y += [corner['Y'], ly, None]
 
-                # Invisible markers on each corner — clickable to zoom telemetry
-                # customdata has 2 elements [corner_num, dist] so we can distinguish
-                # these clicks from racing-line clicks (which have 3 elements).
+                # Thin connector lines from apex to label
                 track_fig.add_trace(go.Scatter(
-                    x=corners_df['X'].tolist(),
-                    y=corners_df['Y'].tolist(),
-                    mode='markers',
-                    marker=dict(size=18, opacity=0),
-                    customdata=[[int(r['Number']), float(r['Distance'])]
+                    x=conn_x, y=conn_y, mode='lines',
+                    line=dict(color='rgba(255,255,255,0.18)', width=0.8),
+                    showlegend=False, hoverinfo='skip', name='__corner_lines__',
+                ))
+
+                # Visible button-style labels — these ARE clickable (scatter fires clickData).
+                # customdata has 4 elements [num, dist, apex_x, apex_y] so we can
+                # distinguish these clicks from racing-line clicks (3 elements).
+                track_fig.add_trace(go.Scatter(
+                    x=label_xs, y=label_ys,
+                    mode='markers+text',
+                    marker=dict(
+                        symbol='square', size=24,
+                        color='rgba(20,20,20,0.88)',
+                        line=dict(color='rgba(200,200,200,0.55)', width=1.2),
+                    ),
+                    text=[f"T{int(r['Number'])}" for _, r in corners_df.iterrows()],
+                    textfont=dict(size=9, color='white'),
+                    textposition='middle center',
+                    customdata=[[int(r['Number']), float(r['Distance']),
+                                 float(r['X']),    float(r['Y'])]
                                 for _, r in corners_df.iterrows()],
-                    hovertemplate='<b>T%{customdata[0]}</b> — click to zoom<extra></extra>',
+                    hovertemplate='<b>T%{customdata[0]}</b> · click to zoom<extra></extra>',
                     showlegend=False,
                     name='__corners__',
                 ))
 
                 corner_store = {
                     'corners': sorted(
-                        [{'num': int(r['Number']), 'dist': float(r['Distance'])}
+                        [{'num': int(r['Number']), 'dist': float(r['Distance']),
+                          'x': float(r['X']),      'y':    float(r['Y'])}
                          for _, r in corners_df.iterrows()],
                         key=lambda c: c['dist'],
                     ),
@@ -468,8 +497,9 @@ def sync_telemetry_zoom(delta_rl, speed_rl, gear_rl, throttle_rl):
     raise PreventUpdate
 
 
-# --- Turn Click: clicking a corner marker zooms all telemetry to that section ---
+# --- Turn Click: clicking a corner button zooms track map + all telemetry ---
 @app.callback(
+    [Output('track-plot', 'figure', allow_duplicate=True)] +
     [Output(pid, 'figure', allow_duplicate=True) for pid in _TELEMETRY_PLOTS],
     Input('track-plot', 'clickData'),
     State('corner-dist-store', 'data'),
@@ -482,32 +512,44 @@ def zoom_to_turn(click_data, corner_data):
     point = click_data['points'][0]
     cd = point.get('customdata')
 
-    # Corner markers have exactly 2-element customdata [corner_num, corner_dist].
+    # Button labels carry 4-element customdata [num, dist, apex_x, apex_y].
     # Racing-line traces carry [distance, speed, gear] (3 elements) — ignore those.
-    if not cd or len(cd) != 2:
+    if not cd or len(cd) != 4:
         raise PreventUpdate
 
-    clicked_dist = cd[1]
-    dists    = [c['dist'] for c in corner_data['corners']]
+    _, clicked_dist, apex_x, apex_y = cd[0], cd[1], cd[2], cd[3]
+    corners  = corner_data['corners']
     max_dist = corner_data['max_dist']
 
-    # Find the closest corner entry (guards against floating-point drift)
-    idx = min(range(len(dists)), key=lambda i: abs(dists[i] - clicked_dist))
+    idx = min(range(len(corners)), key=lambda i: abs(corners[i]['dist'] - clicked_dist))
 
-    prev_dist = dists[idx - 1] if idx > 0         else 0.0
-    next_dist = dists[idx + 1] if idx < len(dists) - 1 else max_dist
+    prev_dist = corners[idx - 1]['dist'] if idx > 0              else 0.0
+    next_dist = corners[idx + 1]['dist'] if idx < len(corners)-1 else max_dist
+    prev_x    = corners[idx - 1]['x']   if idx > 0              else apex_x
+    prev_y    = corners[idx - 1]['y']   if idx > 0              else apex_y
+    next_x    = corners[idx + 1]['x']   if idx < len(corners)-1 else apex_x
+    next_y    = corners[idx + 1]['y']   if idx < len(corners)-1 else apex_y
 
-    # Section = midpoint to prev corner → midpoint to next corner
-    x0 = (prev_dist + clicked_dist) / 2
-    x1 = (clicked_dist + next_dist) / 2
+    # --- Telemetry: midpoint boundaries, 200 m minimum ---
+    t0 = (prev_dist + clicked_dist) / 2
+    t1 = (clicked_dist + next_dist) / 2
+    if t1 - t0 < 200:
+        mid = (t0 + t1) / 2
+        t0  = max(0.0, mid - 100)
+        t1  = min(max_dist, mid + 100)
 
-    # Enforce a 200 m minimum window so chicane sections aren't too narrow
-    if x1 - x0 < 200:
-        mid = (x0 + x1) / 2
-        x0  = max(0.0, mid - 100)
-        x1  = min(max_dist, mid + 100)
+    # --- Track map: bounding box of prev / current / next corner apexes + padding ---
+    xs = [prev_x, apex_x, next_x]
+    ys = [prev_y, apex_y, next_y]
+    pad = max((max(xs) - min(xs)) * 0.5, (max(ys) - min(ys)) * 0.5, 300)
+    track_patch = Patch()
+    track_patch['layout']['xaxis']['range']     = [min(xs) - pad, max(xs) + pad]
+    track_patch['layout']['xaxis']['autorange'] = False
+    track_patch['layout']['yaxis']['range']     = [min(ys) - pad, max(ys) + pad]
+    track_patch['layout']['yaxis']['autorange'] = False
 
-    return [_xaxis_patch(range=[x0, x1], autorange=False) for _ in _TELEMETRY_PLOTS]
+    return [track_patch] + [_xaxis_patch(range=[t0, t1], autorange=False)
+                             for _ in _TELEMETRY_PLOTS]
 
 
 if __name__ == '__main__':
