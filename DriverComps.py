@@ -29,13 +29,10 @@ server = app.server
 
 # --- Constants ---
 _current_year = datetime.now().year
-_today = datetime.now()
-YEARS = list(range(2018, _current_year + 1))[::-1]
-try:
-    _cur_schedule = fastf1.get_event_schedule(_current_year, include_testing=False)
-    DEFAULT_YEAR = _current_year if (not _cur_schedule.empty and (_cur_schedule['EventDate'] < _today).any()) else _current_year - 1
-except Exception:
-    DEFAULT_YEAR = _current_year - 1
+_today        = datetime.now()
+YEARS         = list(range(2018, _current_year + 1))[::-1]
+# F1 season starts in March; default to previous year if we're still in Jan–Feb
+DEFAULT_YEAR  = _current_year if _today.month > 2 else _current_year - 1
 
 PLOT_TEMPLATE  = 'plotly_dark'
 BG_COLOR       = '#111111'
