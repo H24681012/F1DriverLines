@@ -34,8 +34,14 @@ server = app.server
 
 # --- Constants & Helpers ---
 _current_year = datetime.now().year
+_today = datetime.now()
 YEARS = list(range(2018, _current_year + 1))[::-1]
-DEFAULT_YEAR = _current_year
+try:
+    _cur_schedule = fastf1.get_event_schedule(_current_year, include_testing=False)
+    _season_started = not _cur_schedule.empty and (_cur_schedule['EventDate'] < _today).any()
+    DEFAULT_YEAR = _current_year if _season_started else _current_year - 1
+except Exception:
+    DEFAULT_YEAR = _current_year - 1
 PLOT_TEMPLATE = 'plotly_dark'
 BG_COLOR = '#111111'
 DRIVER1_COLOR = 'blue'
@@ -45,13 +51,13 @@ DROPDOWN_STYLE = {'color': 'black'}
 _session_cache = {}
 _SESSION_CACHE_MAX = 8
 
-def get_session(year, gp, session_type):
-    key = (year, gp, session_type)
+def get_session(year, gp, session_type, telemetry=True):
+    key = (year, gp, session_type, telemetry)
     if key in _session_cache:
         return _session_cache[key]
     try:
         session = fastf1.get_session(year, gp, session_type)
-        session.load(telemetry=True, laps=True, weather=False)
+        session.load(telemetry=telemetry, laps=True, weather=False)
         # Evict oldest entry if cache is full
         if len(_session_cache) >= _SESSION_CACHE_MAX:
             oldest_key = next(iter(_session_cache))
@@ -171,11 +177,11 @@ def create_gp_dropdown_callback(output_id, year_id):
         return options, options[-1]['value'] if options else None
 
 def create_driver_dropdown_callback(output_id, year_id, gp_id, session_id):
-    @app.callback(Output(output_id, 'options'), [Input(year_id, 'value'), Input(gp_id, 'value'), Input(session_id, 'value')], prevent_initial_call=True)
+    @app.callback(Output(output_id, 'options'), [Input(year_id, 'value'), Input(gp_id, 'value'), Input(session_id, 'value')])
     def update_driver_dropdown(year, gp, session_type):
         if not all([year, gp, session_type]): return []
         try:
-            session = get_session(year, gp, session_type)
+            session = get_session(year, gp, session_type, telemetry=False)
             drivers = session.laps['Driver'].unique() if session and session.laps is not None else []
             return [{'label': driver, 'value': driver} for driver in sorted(drivers)]
         except Exception as e:
