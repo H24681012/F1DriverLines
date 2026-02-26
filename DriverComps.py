@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, Input, Output, State, no_update, callback_context
+from dash import dcc, html, Input, Output, State, no_update, callback_context, Patch
 import fastf1
 from fastf1.utils import delta_time
 import pandas as pd
@@ -331,16 +331,16 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
             else:
                  track_fig.add_trace(go.Scatter(x=data['X'], y=data['Y'], mode='lines', line=dict(color=color, width=3, dash='dash'), name=f"{name} Line", legendgroup=name, showlegend=True, customdata=np.column_stack([data['Distance'], data['Speed'], data['nGear']]), hovertemplate='Dist: %{customdata[0]:.0f}m<br>Speed: %{customdata[1]:.0f} km/h<br>Gear: %{customdata[2]:.0f}<extra>%{fullData.name}</extra>'))
             
-            track_fig.add_trace(go.Scatter(x=data.loc[starts, 'X'], y=data.loc[starts, 'Y'], mode='markers', marker=dict(symbol='circle-open', size=12, color='#ff4444', line=dict(width=3)), showlegend=False, name=f'{name}_bs', legendgroup=name))
-            track_fig.add_trace(go.Scatter(x=data.loc[ends, 'X'], y=data.loc[ends, 'Y'], mode='markers', marker=dict(symbol='circle', size=12, color='#44dd44', line=dict(color='white', width=2)), showlegend=False, name=f'{name}_be', legendgroup=name))
+            track_fig.add_trace(go.Scatter(x=data.loc[starts, 'X'], y=data.loc[starts, 'Y'], mode='markers', marker=dict(symbol='circle-open', size=11, color=color, line=dict(color=color, width=2.5)), showlegend=False, name=f'{name}_bs', legendgroup=name))
+            track_fig.add_trace(go.Scatter(x=data.loc[ends, 'X'], y=data.loc[ends, 'Y'], mode='markers', marker=dict(symbol='circle', size=11, color=color, line=dict(color='white', width=1.5)), showlegend=False, name=f'{name}_be', legendgroup=name))
         
         track_fig.add_trace(go.Scatter(x=[np.mean([ref_merged['X'].iloc[0], cmp_merged['X'].iloc[0]])], y=[np.mean([ref_merged['Y'].iloc[0], cmp_merged['Y'].iloc[0]])], mode='markers', marker=dict(symbol='star', size=15, color='yellow'), name="Lap Start"))
         
         # Add legend explanations
         track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', line=dict(color='gray', dash='dot'), name="Under Braking", showlegend=True))
         track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', line=dict(color='gray', dash='dash'), name="Throttle/Coast", showlegend=True))
-        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle-open', size=12, color='#ff4444', line=dict(width=3)), name="Brake Start", showlegend=True))
-        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle', size=12, color='#44dd44', line=dict(color='white', width=2)), name="Brake End", showlegend=True))
+        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle-open', size=10, color='gray', line=dict(color='gray', width=2.5)), name="Brake Start (driver colour)", showlegend=True))
+        track_fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(symbol='circle', size=10, color='gray', line=dict(color='white', width=1.5)), name="Brake End (driver colour)", showlegend=True))
         
         track_fig.update_layout(
             title_text='Racing Line (Geographic Orientation)', 
@@ -374,19 +374,30 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
             circuit_info = active_session.get_circuit_info()
             if circuit_info is not None and hasattr(circuit_info, 'corners') and circuit_info.corners is not None:
                 corners = circuit_info.corners
+                # Centroid of the full track for radial outward placement
+                cx = np.concatenate([ref_merged['X'].values, cmp_merged['X'].values]).mean()
+                cy = np.concatenate([ref_merged['Y'].values, cmp_merged['Y'].values]).mean()
                 for _, corner in corners.iterrows():
-                    label = f"T{int(corner['Number'])}"
+                    dx = corner['X'] - cx
+                    dy = corner['Y'] - cy
+                    dist = np.sqrt(dx**2 + dy**2)
+                    if dist == 0:
+                        continue
+                    # Push label outward from track centre — 55px in the radial direction
+                    offset_px = 55
+                    ax_off = (dx / dist) * offset_px
+                    ay_off = -(dy / dist) * offset_px  # Plotly ay: negative = up on screen
                     track_fig.add_annotation(
                         x=corner['X'], y=corner['Y'],
-                        text=label,
+                        text=f"T{int(corner['Number'])}",
                         showarrow=True,
                         arrowhead=0,
                         arrowwidth=1,
-                        arrowcolor='rgba(255, 255, 255, 0.3)',
-                        ax=30, ay=-30,
-                        font=dict(size=10, color='white', family='Arial Black'),
-                        bgcolor='rgba(255, 255, 255, 0.15)',
-                        bordercolor='rgba(255, 255, 255, 0.3)',
+                        arrowcolor='rgba(255,255,255,0.2)',
+                        ax=ax_off, ay=ay_off,
+                        font=dict(size=9, color='rgba(220,220,220,0.85)'),
+                        bgcolor='rgba(0,0,0,0.55)',
+                        bordercolor='rgba(255,255,255,0.15)',
                         borderwidth=1,
                         borderpad=2,
                     )
@@ -418,6 +429,47 @@ def compare_and_zoom(drv_clicks, yrs_clicks, relayout, feature, y_d, gp_d, s_d, 
     except Exception as e:
         print(f"Error processing comparison: {e}")
         return create_empty_figure(f"Error: {e}"), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), create_empty_figure(""), no_update
+
+# --- Linked Zoom: drag-zoom on any telemetry plot syncs all others ---
+_TELEMETRY_PLOTS = ['delta-plot', 'speed-plot', 'gear-plot', 'throttle-plot']
+
+@app.callback(
+    [Output(pid, 'figure', allow_duplicate=True) for pid in _TELEMETRY_PLOTS],
+    [Input(pid, 'relayoutData') for pid in _TELEMETRY_PLOTS],
+    prevent_initial_call=True
+)
+def sync_telemetry_zoom(delta_rl, speed_rl, gear_rl, throttle_rl):
+    ctx = callback_context
+    triggered_id = ctx.triggered_id
+    if not triggered_id:
+        return [no_update] * 4
+    all_rl = dict(zip(_TELEMETRY_PLOTS, [delta_rl, speed_rl, gear_rl, throttle_rl]))
+    triggered_rl = all_rl.get(triggered_id) or {}
+
+    if 'xaxis.range[0]' in triggered_rl:
+        x0, x1 = triggered_rl['xaxis.range[0]'], triggered_rl['xaxis.range[1]']
+        result = []
+        for pid in _TELEMETRY_PLOTS:
+            if pid == triggered_id:
+                result.append(no_update)
+            else:
+                p = Patch()
+                p['layout']['xaxis']['range'] = [x0, x1]
+                p['layout']['xaxis']['autorange'] = False
+                result.append(p)
+        return result
+    elif 'xaxis.autorange' in triggered_rl or 'autosize' in triggered_rl:
+        result = []
+        for pid in _TELEMETRY_PLOTS:
+            if pid == triggered_id:
+                result.append(no_update)
+            else:
+                p = Patch()
+                p['layout']['xaxis']['autorange'] = True
+                result.append(p)
+        return result
+    return [no_update] * 4
+
 
 # --- Plotting Helper Functions ---
 def create_delta_plot(x, y, name1, name2, title_suffix=""):
