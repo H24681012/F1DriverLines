@@ -181,6 +181,7 @@ app.layout = dbc.Container([
             dcc.Loading(dcc.Graph(id='speed-plot',    figure=create_empty_figure(), config=_GRAPH_CONFIG), type="circle"),
             dcc.Loading(dcc.Graph(id='gear-plot',     figure=create_empty_figure(), config=_GRAPH_CONFIG), type="circle"),
             dcc.Loading(dcc.Graph(id='throttle-plot', figure=create_empty_figure(), config=_GRAPH_CONFIG), type="circle"),
+            dcc.Store(id='corner-dist-store'),
         ], width=9),
     ]),
 ], fluid=True, style={'backgroundColor': BG_COLOR, 'padding': '20px'})
@@ -227,7 +228,7 @@ create_driver_dropdown_callback('driver-years',    'year1-years',   'gp1-years',
 # --- Main Comparison Callback ---
 @app.callback(
     [Output('track-plot', 'figure'), Output('delta-plot', 'figure'), Output('speed-plot', 'figure'),
-     Output('gear-plot', 'figure'),  Output('throttle-plot', 'figure')],
+     Output('gear-plot', 'figure'),  Output('throttle-plot', 'figure'), Output('corner-dist-store', 'data')],
     [Input('compare-btn-drivers', 'n_clicks'), Input('compare-btn-years', 'n_clicks')],
     [State('feature-dropdown', 'value'),
      State('year-drivers', 'value'), State('gp-drivers', 'value'), State('session-type-drivers', 'value'),
@@ -355,14 +356,17 @@ def compare(drv_clicks, yrs_clicks, feature,
         track_fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
         track_fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(100,100,100,0.5)')
 
-        # Turn labels — placed radially outward from the track centroid
+        # Turn labels + clickable corner markers
+        corner_store = None
         try:
             active_session = session if feature == 'drivers' else s1_obj
             circuit_info = active_session.get_circuit_info()
             if circuit_info is not None and getattr(circuit_info, 'corners', None) is not None:
+                corners_df = circuit_info.corners
                 cx = np.concatenate([ref_merged['X'].values, cmp_merged['X'].values]).mean()
                 cy = np.concatenate([ref_merged['Y'].values, cmp_merged['Y'].values]).mean()
-                for _, corner in circuit_info.corners.iterrows():
+
+                for _, corner in corners_df.iterrows():
                     dx, dy = corner['X'] - cx, corner['Y'] - cy
                     d = np.hypot(dx, dy)
                     if d == 0:
@@ -379,6 +383,30 @@ def compare(drv_clicks, yrs_clicks, feature,
                         bordercolor='rgba(255,255,255,0.15)',
                         borderwidth=1, borderpad=2,
                     )
+
+                # Invisible markers on each corner — clickable to zoom telemetry
+                # customdata has 2 elements [corner_num, dist] so we can distinguish
+                # these clicks from racing-line clicks (which have 3 elements).
+                track_fig.add_trace(go.Scatter(
+                    x=corners_df['X'].tolist(),
+                    y=corners_df['Y'].tolist(),
+                    mode='markers',
+                    marker=dict(size=18, opacity=0),
+                    customdata=[[int(r['Number']), float(r['Distance'])]
+                                for _, r in corners_df.iterrows()],
+                    hovertemplate='<b>T%{customdata[0]}</b> — click to zoom<extra></extra>',
+                    showlegend=False,
+                    name='__corners__',
+                ))
+
+                corner_store = {
+                    'corners': sorted(
+                        [{'num': int(r['Number']), 'dist': float(r['Distance'])}
+                         for _, r in corners_df.iterrows()],
+                        key=lambda c: c['dist'],
+                    ),
+                    'max_dist': float(ref_merged['Distance'].max()),
+                }
         except Exception as e:
             print(f"Could not add turn labels: {e}")
 
@@ -399,12 +427,12 @@ def compare(drv_clicks, yrs_clicks, feature,
         gear_fig     = create_telemetry_plot(common_dist, gear1,     gear2,     "Gear",         label1, label2, line_shape='hv')
         throttle_fig = create_telemetry_plot(common_dist, throttle1, throttle2, "Throttle (%)", label1, label2)
 
-        return track_fig, delta_fig, speed_fig, gear_fig, throttle_fig
+        return track_fig, delta_fig, speed_fig, gear_fig, throttle_fig, corner_store
 
     except Exception as e:
         print(f"Comparison error: {e}")
         empty = create_empty_figure(f"Error: {e}")
-        return empty, create_empty_figure(), create_empty_figure(), create_empty_figure(), create_empty_figure()
+        return empty, create_empty_figure(), create_empty_figure(), create_empty_figure(), create_empty_figure(), None
 
 
 # --- Linked Zoom: drag-zoom on any telemetry plot syncs all others ---
@@ -438,6 +466,48 @@ def sync_telemetry_zoom(delta_rl, speed_rl, gear_rl, throttle_rl):
                 for pid in _TELEMETRY_PLOTS]
 
     raise PreventUpdate
+
+
+# --- Turn Click: clicking a corner marker zooms all telemetry to that section ---
+@app.callback(
+    [Output(pid, 'figure', allow_duplicate=True) for pid in _TELEMETRY_PLOTS],
+    Input('track-plot', 'clickData'),
+    State('corner-dist-store', 'data'),
+    prevent_initial_call=True,
+)
+def zoom_to_turn(click_data, corner_data):
+    if not click_data or not corner_data:
+        raise PreventUpdate
+
+    point = click_data['points'][0]
+    cd = point.get('customdata')
+
+    # Corner markers have exactly 2-element customdata [corner_num, corner_dist].
+    # Racing-line traces carry [distance, speed, gear] (3 elements) — ignore those.
+    if not cd or len(cd) != 2:
+        raise PreventUpdate
+
+    clicked_dist = cd[1]
+    dists    = [c['dist'] for c in corner_data['corners']]
+    max_dist = corner_data['max_dist']
+
+    # Find the closest corner entry (guards against floating-point drift)
+    idx = min(range(len(dists)), key=lambda i: abs(dists[i] - clicked_dist))
+
+    prev_dist = dists[idx - 1] if idx > 0         else 0.0
+    next_dist = dists[idx + 1] if idx < len(dists) - 1 else max_dist
+
+    # Section = midpoint to prev corner → midpoint to next corner
+    x0 = (prev_dist + clicked_dist) / 2
+    x1 = (clicked_dist + next_dist) / 2
+
+    # Enforce a 200 m minimum window so chicane sections aren't too narrow
+    if x1 - x0 < 200:
+        mid = (x0 + x1) / 2
+        x0  = max(0.0, mid - 100)
+        x1  = min(max_dist, mid + 100)
+
+    return [_xaxis_patch(range=[x0, x1], autorange=False) for _ in _TELEMETRY_PLOTS]
 
 
 if __name__ == '__main__':
