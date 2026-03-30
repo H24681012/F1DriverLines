@@ -13,7 +13,7 @@ import functools
 from datetime import datetime
 
 # --- FastF1 Version Check & Cache Setup ---
-required_version = (3, 3, 3)
+required_version = (3, 8, 2)
 if tuple(map(int, fastf1.__version__.split('.'))) < required_version:
     sys.exit(
         f"FastF1 >= {'.'.join(map(str, required_version))} required, "

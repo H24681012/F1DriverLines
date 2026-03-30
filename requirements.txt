@@ -3,5 +3,5 @@ dash-bootstrap-components
 pandas
 numpy
 plotly
-fastf1==3.3.3
+fastf1>=3.8.2
 gunicorn
