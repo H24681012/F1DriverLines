@@ -86,7 +86,19 @@ MAX_PLOT_POINTS = 800
 def downsample_df(df, n=MAX_PLOT_POINTS):
     if len(df) <= n:
         return df
-    idx = np.round(np.linspace(0, len(df) - 1, n)).astype(int)
+    # Preserve brake transition rows so braking zones stay exact
+    if 'Brake' in df.columns:
+        is_brake = df['Brake'] > 0
+        transitions = is_brake.ne(is_brake.shift()).fillna(True)
+        keep = set(df.index[transitions].tolist() + [0, len(df) - 1])
+        budget = max(0, n - len(keep))
+        remaining = sorted(set(range(len(df))) - keep)
+        if budget > 0 and remaining:
+            pick = np.round(np.linspace(0, len(remaining) - 1, budget)).astype(int)
+            keep.update(remaining[i] for i in pick)
+        idx = sorted(keep)
+    else:
+        idx = np.round(np.linspace(0, len(df) - 1, n)).astype(int)
     return df.iloc[idx].reset_index(drop=True)
 
 def _prefetch_telemetry(year, gp, session_type):
