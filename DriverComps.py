@@ -11,6 +11,7 @@ import sys
 import os
 import functools
 from datetime import datetime
+import threading
 
 # --- FastF1 Version Check & Cache Setup ---
 required_version = (3, 8, 2)
@@ -44,7 +45,7 @@ BRAKE_DASH     = {'throttle': 'dash', 'brake': 'dot'}
 
 # --- Session Cache ---
 _session_cache    = {}
-_SESSION_CACHE_MAX = 8
+_SESSION_CACHE_MAX = 16
 
 def get_session(year, gp, session_type, telemetry=True):
     key = (year, gp, session_type, telemetry)
@@ -79,6 +80,20 @@ def resample_telemetry(target_dist, source_dist, source_vals):
     if len(unique_dist) < 2:
         return np.full(n, source_vals[unique_idx[0]] if len(unique_dist) == 1 else np.nan)
     return np.interp(target_dist, unique_dist, source_vals[unique_idx])
+
+MAX_PLOT_POINTS = 800
+
+def downsample_df(df, n=MAX_PLOT_POINTS):
+    if len(df) <= n:
+        return df
+    idx = np.round(np.linspace(0, len(df) - 1, n)).astype(int)
+    return df.iloc[idx].reset_index(drop=True)
+
+def _prefetch_telemetry(year, gp, session_type):
+    try:
+        get_session(year, gp, session_type, telemetry=True)
+    except Exception:
+        pass
 
 # --- Plotting Helpers ---
 def _best_label_position(cx, cy, track_x, track_y, offset, n_angles=24):
@@ -223,6 +238,8 @@ def create_driver_dropdown_callback(output_id, year_id, gp_id, session_id):
             return []
         try:
             session = get_session(year, gp, session_type, telemetry=False)
+            # Pre-fetch with telemetry in background so Compare is instant
+            threading.Thread(target=_prefetch_telemetry, args=(year, gp, session_type), daemon=True).start()
             drivers = session.laps['Driver'].unique() if session and session.laps is not None else []
             return [{'label': d, 'value': d} for d in sorted(drivers)]
         except Exception as e:
@@ -296,6 +313,9 @@ def compare(drv_clicks, yrs_clicks, feature,
             on='Time', direction='nearest',
         ).dropna(subset=['X', 'Y', 'Distance']).reset_index(drop=True)
 
+        ref_merged = downsample_df(ref_merged)
+        cmp_merged = downsample_df(cmp_merged)
+
         track_fig = go.Figure()
         for name, data, color in [(label1, ref_merged, DRIVER1_COLOR), (label2, cmp_merged, DRIVER2_COLOR)]:
             is_brake    = data['Brake'] > 0
@@ -305,27 +325,34 @@ def compare(drv_clicks, yrs_clicks, feature,
             bounds      = sorted(set([0] + starts.tolist() + ends.tolist() + [len(data) - 1]))
 
             hover = 'Dist: %{customdata[0]:.0f}m<br>Speed: %{customdata[1]:.0f} km/h<br>Gear: %{customdata[2]:.0f}<extra>%{fullData.name}</extra>'
-            if len(bounds) > 1:
-                for i in range(len(bounds) - 1):
-                    start, end = bounds[i], bounds[i + 1]
-                    if start >= end:
-                        continue
-                    seg = data.iloc[start:end + 1]
-                    dash = BRAKE_DASH['brake' if start in starts_set else 'throttle']
-                    track_fig.add_trace(go.Scatter(
-                        x=seg['X'], y=seg['Y'], mode='lines',
-                        line=dict(color=color, width=3, dash=dash),
-                        name=f"{name} Line", legendgroup=name, showlegend=(i == 0),
-                        customdata=np.column_stack([seg['Distance'], seg['Speed'], seg['nGear']]),
-                        hovertemplate=hover,
-                    ))
-            else:
+            # Consolidate into 2 traces per driver (brake + coast) using None gaps
+            brake_x, brake_y, brake_cd = [], [], []
+            coast_x, coast_y, coast_cd = [], [], []
+            gap = [np.nan, np.nan, np.nan]
+            for i in range(len(bounds) - 1):
+                start, end = bounds[i], bounds[i + 1]
+                if start >= end:
+                    continue
+                seg = data.iloc[start:end + 1]
+                sx, sy = seg['X'].tolist(), seg['Y'].tolist()
+                cd = np.column_stack([seg['Distance'], seg['Speed'], seg['nGear']]).tolist()
+                if start in starts_set:
+                    brake_x += sx + [None]; brake_y += sy + [None]; brake_cd += cd + [gap]
+                else:
+                    coast_x += sx + [None]; coast_y += sy + [None]; coast_cd += cd + [gap]
+            if coast_x:
                 track_fig.add_trace(go.Scatter(
-                    x=data['X'], y=data['Y'], mode='lines',
+                    x=coast_x, y=coast_y, mode='lines',
                     line=dict(color=color, width=3, dash='dash'),
                     name=f"{name} Line", legendgroup=name, showlegend=True,
-                    customdata=np.column_stack([data['Distance'], data['Speed'], data['nGear']]),
-                    hovertemplate=hover,
+                    customdata=coast_cd, hovertemplate=hover,
+                ))
+            if brake_x:
+                track_fig.add_trace(go.Scatter(
+                    x=brake_x, y=brake_y, mode='lines',
+                    line=dict(color=color, width=3, dash='dot'),
+                    name=f"{name} Braking", legendgroup=name, showlegend=False,
+                    customdata=brake_cd, hovertemplate=hover,
                 ))
 
             track_fig.add_trace(go.Scatter(
@@ -439,6 +466,9 @@ def compare(drv_clicks, yrs_clicks, feature,
         # --- Telemetry ---
         delta_s, ref_tel, cmp_tel = delta_time(lap1, lap2)
         common_dist = ref_tel['Distance'].to_numpy()
+        if len(common_dist) > MAX_PLOT_POINTS:
+            ds_idx = np.round(np.linspace(0, len(common_dist) - 1, MAX_PLOT_POINTS)).astype(int)
+            common_dist = common_dist[ds_idx]
 
         delta    = resample_telemetry(common_dist, ref_tel['Distance'], delta_s)
         speed1   = resample_telemetry(common_dist, ref_tel['Distance'], ref_tel['Speed'])
