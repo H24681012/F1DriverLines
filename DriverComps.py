@@ -45,23 +45,36 @@ SESSIONS       = ['FP1', 'FP2', 'FP3', 'Q', 'Sprint Shootout', 'Sprint', 'R']
 BRAKE_DASH     = {'throttle': 'dash', 'brake': 'dot'}
 
 # --- Session Cache ---
-_session_cache    = {}
-_SESSION_CACHE_MAX = 16
+# In-memory cache holds fully-parsed sessions (100MB+ each with telemetry),
+# so keep it small; the FastF1 disk cache makes reloads cheap anyway.
+_session_cache     = {}
+_SESSION_CACHE_MAX = int(os.environ.get('SESSION_CACHE_MAX', 4))
+_session_locks     = {}
+_locks_guard       = threading.Lock()
+
+def _lock_for(key):
+    with _locks_guard:
+        return _session_locks.setdefault(key, threading.Lock())
 
 def get_session(year, gp, session_type, telemetry=True):
     key = (year, gp, session_type, telemetry)
     if key in _session_cache:
         return _session_cache[key]
-    try:
-        session = fastf1.get_session(year, gp, session_type)
-        session.load(telemetry=telemetry, laps=True, weather=False)
-        if len(_session_cache) >= _SESSION_CACHE_MAX:
-            del _session_cache[next(iter(_session_cache))]
-        _session_cache[key] = session
-        return session
-    except Exception as e:
-        print(f"Error loading session {year} {gp} {session_type}: {e}")
-        return None
+    # One load per key at a time: concurrent requests wait instead of
+    # each downloading and parsing the same session.
+    with _lock_for(key):
+        if key in _session_cache:
+            return _session_cache[key]
+        try:
+            session = fastf1.get_session(year, gp, session_type)
+            session.load(telemetry=telemetry, laps=True, weather=False)
+            while len(_session_cache) >= _SESSION_CACHE_MAX:
+                del _session_cache[next(iter(_session_cache))]
+            _session_cache[key] = session
+            return session
+        except Exception as e:
+            print(f"Error loading session {year} {gp} {session_type}: {e}")
+            return None
 
 @functools.lru_cache(maxsize=16)
 def get_schedule(year):
@@ -112,6 +125,27 @@ def _prefetch_telemetry(year, gp, session_type):
         get_session(year, gp, session_type, telemetry=True)
     except Exception:
         pass
+
+def _prewarm_disk_cache(year, sessions=('Q', 'R')):
+    """Download + parse this season's completed sessions into the FastF1 disk
+    cache so first user requests hit disk instead of the F1 servers. Sessions
+    are discarded after loading to keep memory flat."""
+    try:
+        events = get_completed_events(year)['EventName'].tolist()[::-1]  # newest first
+    except Exception as e:
+        print(f"Prewarm: could not fetch schedule for {year}: {e}")
+        return
+    for gp in events:
+        for st in sessions:
+            try:
+                sess = fastf1.get_session(year, gp, st)
+                sess.load(telemetry=True, laps=True, weather=False)
+                print(f"Prewarm: cached {year} {gp} {st}")
+            except Exception as e:
+                print(f"Prewarm: skipped {year} {gp} {st}: {e}")
+
+if os.environ.get('PREWARM_CACHE', '1') == '1':
+    threading.Thread(target=_prewarm_disk_cache, args=(DEFAULT_YEAR,), daemon=True).start()
 
 # --- Plotting Helpers ---
 def _best_label_position(cx, cy, track_x, track_y, offset, n_angles=24):
