@@ -21,8 +21,9 @@ if tuple(map(int, fastf1.__version__.split('.'))) < required_version:
         f"found {fastf1.__version__}. Run: pip install --upgrade fastf1"
     )
 
-os.makedirs('cache', exist_ok=True)
-fastf1.Cache.enable_cache('cache')
+CACHE_DIR = os.environ.get('FASTF1_CACHE_DIR', 'cache')
+os.makedirs(CACHE_DIR, exist_ok=True)
+fastf1.Cache.enable_cache(CACHE_DIR)
 
 # --- App ---
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY], suppress_callback_exceptions=True)
@@ -65,6 +66,11 @@ def get_session(year, gp, session_type, telemetry=True):
 @functools.lru_cache(maxsize=16)
 def get_schedule(year):
     return fastf1.get_event_schedule(year, include_testing=False)
+
+def get_completed_events(year):
+    """Events whose race weekend has already started, so session data can exist."""
+    sched = get_schedule(year)
+    return sched[sched['EventDate'] <= pd.Timestamp.now()]
 
 # --- Telemetry Helpers ---
 def resample_telemetry(target_dist, source_dist, source_vals):
@@ -240,7 +246,7 @@ def create_gp_dropdown_callback(output_id, year_id):
     def _cb(year):
         if not year:
             return [], None
-        options = [{'label': n, 'value': n} for n in get_schedule(year)['EventName']]
+        options = [{'label': n, 'value': n} for n in get_completed_events(year)['EventName']]
         return options, (options[-1]['value'] if options else None)
 
 def create_driver_dropdown_callback(output_id, year_id, gp_id, session_id):

@@ -3,7 +3,10 @@ services:
     name: f1driverlines
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn DriverComps:server
+    startCommand: gunicorn DriverComps:server --workers 1 --threads 4 --timeout 300
+    envVars:
+      - key: FASTF1_CACHE_DIR
+        value: /app/cache
     disk:
       name: f1cache
       mountPath: /app/cache
