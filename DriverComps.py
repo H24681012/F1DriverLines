@@ -144,7 +144,7 @@ def _prewarm_disk_cache(year, sessions=('Q', 'R')):
             except Exception as e:
                 print(f"Prewarm: skipped {year} {gp} {st}: {e}")
 
-if os.environ.get('PREWARM_CACHE', '1') == '1':
+if os.environ.get('PREWARM_CACHE', '0') == '1':
     threading.Thread(target=_prewarm_disk_cache, args=(DEFAULT_YEAR,), daemon=True).start()
 
 # --- Plotting Helpers ---
